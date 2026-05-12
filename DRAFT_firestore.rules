@@ -1,0 +1,51 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() { return request.auth != null; }
+    function isValidId(id) { return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // Validation helpers
+    function isValidSKU(data) {
+      return data.sku is string && data.sku.size() <= 128;
+    }
+    function isValidHarvest(data) {
+      return data.sku is string && data.sku.size() <= 128 && data.content is string;
+    }
+    function isValidJobOutput(data) {
+      return data.sku is string && data.sku.size() <= 128 && data.data is map;
+    }
+    function isValidSetting(data) {
+      return data.key is string && data.key.size() <= 128 && data.value is map;
+    }
+
+    // Collections
+    match /skus/{skuId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidId(skuId) && isValidSKU(incoming());
+      allow delete: if isSignedIn();
+    }
+    match /harvests/{skuId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidId(skuId) && isValidHarvest(incoming());
+      allow delete: if isSignedIn();
+    }
+    match /outputs/{skuId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidId(skuId) && isValidJobOutput(incoming());
+      allow delete: if isSignedIn();
+    }
+    match /settings/{settingId} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && isValidId(settingId) && isValidSetting(incoming());
+      allow delete: if isSignedIn();
+    }
+  }
+}

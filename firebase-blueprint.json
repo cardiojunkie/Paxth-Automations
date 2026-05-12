@@ -1,0 +1,77 @@
+{
+  "entities": {
+    "SKU": {
+      "title": "SKU Record",
+      "description": "Information about a product SKU",
+      "type": "object",
+      "properties": {
+        "sku": { "type": "string" }
+      },
+      "required": ["sku"]
+    },
+    "Harvest": {
+      "title": "Harvested Content",
+      "description": "Markdown content harvested from a URL",
+      "type": "object",
+      "properties": {
+        "sku": { "type": "string" },
+        "content": { "type": "string" },
+        "secondary_content": { "type": "string" }
+      },
+      "required": ["sku", "content"]
+    },
+    "JobOutput": {
+      "title": "Job Output",
+      "description": "JSON output for a SKU",
+      "type": "object",
+      "properties": {
+        "sku": { "type": "string" },
+        "data": { "type": "object" }
+      },
+      "required": ["sku", "data"]
+    },
+    "Setting": {
+        "title": "Application Setting",
+        "description": "User configuration settings",
+        "type": "object",
+        "properties": {
+            "key": { "type": "string" },
+            "value": { "type": "object" }
+        },
+        "required": ["key", "value"]
+    },
+    "AllowlistEntry": {
+        "title": "Allowlist Entry",
+        "description": "User email permitted to access the application",
+        "type": "object",
+        "properties": {
+            "email": { "type": "string" },
+            "role": { "type": "string", "enum": ["admin", "user"] },
+            "addedAt": { "type": "string", "format": "date-time" }
+        },
+        "required": ["email", "role"]
+    }
+  },
+  "firestore": {
+    "/allowlist/{email}": {
+      "schema": "AllowlistEntry",
+      "description": "Emails permitted to log in"
+    },
+    "/skus/{skuId}": {
+      "schema": "SKU",
+      "description": "SKU index records"
+    },
+    "/harvests/{skuId}": {
+        "schema": "Harvest",
+        "description": "Harvested markdown content"
+    },
+    "/outputs/{skuId}": {
+        "schema": "JobOutput",
+        "description": "Processed job outputs"
+    },
+    "/settings/{settingId}": {
+        "schema": "Setting",
+        "description": "Application settings"
+    }
+  }
+}

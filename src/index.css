@@ -1,0 +1,53 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-brand-bg: #050505;
+  --color-brand-panel: rgba(20, 20, 20, 0.8);
+  --color-brand-border: rgba(255, 255, 255, 0.08);
+
+  --animate-spin-slow: spin-slow 8s linear infinite;
+
+  @keyframes spin-slow {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+}
+
+@layer base {
+  body {
+    @apply bg-brand-bg text-gray-200 font-sans antialiased overflow-hidden h-screen w-screen selection:bg-blue-500/30;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-brand-panel border border-brand-border backdrop-blur-md shadow-2xl;
+  }
+  
+  .accent-glow {
+    @apply shadow-[0_0_15px_rgba(59,130,246,0.2)];
+  }
+  
+  .status-pulse {
+    animation: status-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  .markdown-body table {
+    @apply w-full border-collapse my-4;
+  }
+  .markdown-body th, .markdown-body td {
+    @apply border border-white/10 p-2 text-left;
+  }
+  .markdown-body th {
+    @apply bg-white/5 font-bold;
+  }
+}
+
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .4; }
+}
