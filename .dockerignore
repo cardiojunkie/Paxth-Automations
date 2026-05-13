@@ -7,7 +7,6 @@ dist
 .env.*
 *.log
 npm-debug.log*
-Dockerfile*
 docker-compose*.yml
 coverage
 CloakBrowser-main
