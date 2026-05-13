@@ -179,6 +179,7 @@ export default function App() {
   const [screenshotEnabled, setScreenshotEnabled] = useState(true);
   const [deepScrollEnabled, setDeepScrollEnabled] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [harvestSku, setHarvestSku] = useState('');
   const [indexerMode, setIndexerMode] = useState<'upload' | 'manual'>('upload');
   const [manualSkuData, setManualSkuData] = useState({
@@ -285,6 +286,11 @@ export default function App() {
   const [tempSelectorName, setTempSelectorName] = useState('');
   const [tempPlpSelectorName, setTempPlpSelectorName] = useState('');
   const [imageUrls, setImageUrls] = useState<string[]>([]);
+  const [selectedImageUrls, setSelectedImageUrls] = useState<string[]>([]);
+  const [isExportingImages, setIsExportingImages] = useState(false);
+  const [imageExportError, setImageExportError] = useState<string | null>(null);
+  const [harvestFileContent, setHarvestFileContent] = useState<string>('');
+  const [loadingHarvestFile, setLoadingHarvestFile] = useState(false);
   const [selectedJobs, setSelectedJobs] = useState<string[]>([]);
   const [jobAiModels, setJobAiModels] = useState<{[sku:string]: string}>({});
   const [currentScreenshot, setCurrentScreenshot] = useState<string | null>(null);
@@ -382,6 +388,109 @@ export default function App() {
       addLog('error', `Image deletion error: ${err.message}`);
     }
   };
+
+  const sanitizeImageSku = (value: string) => value.trim().replace(/[^a-z0-9_-]/gi, '_') || 'sku';
+
+  const toggleImageSelection = (url: string) => {
+    setImageExportError(null);
+    setSelectedImageUrls(prev => {
+      if (prev.includes(url)) {
+        return prev.filter(item => item !== url);
+      }
+
+      if (prev.length >= 10) {
+        addLog('error', 'Select up to 10 scraped images before exporting.');
+        return prev;
+      }
+
+      return [...prev, url];
+    });
+  };
+
+  const exportSelectedImages = async () => {
+    if (selectedImageUrls.length === 0 || isExportingImages) return;
+
+    // Use provided SKU or default to 'sku'
+    const effectiveSku = imageSku.trim() || 'sku';
+    const safeSku = sanitizeImageSku(effectiveSku);
+    setIsExportingImages(true);
+    setImageExportError(null);
+
+    console.log('[EXPORT] Starting export:', { selectedCount: selectedImageUrls.length, sku: effectiveSku, safeSku });
+
+    try {
+      for (let index = 0; index < selectedImageUrls.length; index++) {
+        const sourceUrl = selectedImageUrls[index];
+        addLog('wait', `Preparing ${safeSku}-${index + 1}.jpg`);
+        
+        console.log(`[EXPORT] Processing ${index + 1}/${selectedImageUrls.length}:`, sourceUrl);
+
+        const res = await apiFetch('/api/images/render', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sku: effectiveSku, url: sourceUrl })
+        });
+
+        if (!res.ok) {
+          const payload = await res.json().catch(() => null);
+          const errorMsg = payload?.error || payload?.details || res.statusText || `Failed to prepare image ${index + 1}`;
+          console.error(`Export error for ${sourceUrl}:`, { status: res.status, payload });
+          throw new Error(errorMsg);
+        }
+
+        const blob = await res.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = objectUrl;
+        anchor.download = `${safeSku}-${index + 1}.jpg`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+        await new Promise(resolve => setTimeout(resolve, 150));
+      }
+
+      addLog('success', `Exported ${selectedImageUrls.length} JPG file(s).`);
+      console.log('[EXPORT] All files exported successfully');
+    } catch (error: any) {
+      const message = error?.message || 'Export failed';
+      setImageExportError(message);
+      addLog('error', message);
+      console.error('[EXPORT] Error:', error);
+    } finally {
+      setIsExportingImages(false);
+    }
+  };
+
+  const loadHarvestFile = async (filename: string) => {
+    setLoadingHarvestFile(true);
+    setImageExportError(null);
+    try {
+      const res = await apiFetch(`/api/harvest/${encodeURIComponent(filename)}`);
+      if (!res.ok) throw new Error('Failed to load harvest file');
+      const content = await res.text();
+      setHarvestFileContent(content);
+      
+      // Extract image URLs from markdown (http/https URLs)
+      const urlPattern = /https?:\/\/[^\s\)]+\.(?:jpg|jpeg|png|webp|gif)/gi;
+      const urls = (content.match(urlPattern) || []).map(url => url.trim()).filter((url, idx, arr) => arr.indexOf(url) === idx);
+      
+      if (urls.length === 0) {
+        throw new Error('No image URLs found in harvest file');
+      }
+      
+      setImageUrls(urls);
+      setSelectedImageUrls([]);
+      addLog('success', `Loaded ${urls.length} image URLs from harvest file.`);
+    } catch (error: any) {
+      const msg = error?.message || 'Failed to load harvest file';
+      setImageExportError(msg);
+      addLog('error', msg);
+    } finally {
+      setLoadingHarvestFile(false);
+    }
+  };
+
   const [selectedLinks, setSelectedLinks] = useState<string[]>([]);
   const [logs, setLogs] = useState<LogEntry[]>([
     { type: 'system', message: 'PaXth Engine initialized (Playwright Mode). System standby.', timestamp: new Date().toLocaleTimeString() }
@@ -812,7 +921,7 @@ export default function App() {
 
   const persistSettings = async (settings: any) => {
     if (!isAdmin) {
-      addLog('error', 'Only admin can modify schemas, mapping logic, and presets.');
+      addLog('error', 'Admin mode is required to save Connectivity, mapping, and preset changes.');
       const res = await apiFetch('/api/settings');
       if (res.ok) {
         const fresh = await res.json();
@@ -821,19 +930,28 @@ export default function App() {
       return;
     }
     try {
+      setIsSavingSettings(true);
       addLog('wait', 'Initiating neural nexus sync...');
       const res = await apiFetch('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(settings)
       });
-      if (res.ok) {
-        addLog('success', 'Neural logic persisted to system root.');
-      } else {
-        throw new Error('Sync failed');
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Sync failed');
       }
-    } catch (e) {
-      addLog('error', 'Nexus sync failure: IO Error');
+
+      const freshRes = await apiFetch('/api/settings');
+      if (freshRes.ok) {
+        const fresh = await freshRes.json();
+        setAppSettings(prev => ({ ...prev, ...fresh }));
+      }
+      addLog('success', 'Neural logic persisted to system root.');
+    } catch (e: any) {
+      addLog('error', `Nexus sync failure: ${e?.message || 'IO Error'}`);
+    } finally {
+      setIsSavingSettings(false);
     }
   };
 
@@ -845,6 +963,8 @@ export default function App() {
     addLog('system', '--- NEW EXTRACTION SESSION STARTED ---');
     setExtractionResult(null);
     setImageUrls([]);
+    setSelectedImageUrls([]);
+    setImageExportError(null);
     setCurrentScreenshot(null);
     setProgress(10);
     
@@ -908,7 +1028,7 @@ export default function App() {
         await new Promise(r => setTimeout(r, 100)); // Pause for paint
       }
 
-      setImageUrls(data.imageUrls || []);
+      setImageUrls(Array.from(new Set(data.imageUrls || [])));
       addLog('success', 'Visual Snapshot ready.');
       setProgress(50);
 
@@ -2164,22 +2284,42 @@ export default function App() {
                                                <label className="text-[9px] text-white/40 font-bold uppercase tracking-widest">Secret Vault / Master Key</label>
                                                <span className="text-[9px] text-blue-400/50 font-mono">Llama-3.3-70B-Versatile</span>
                                              </div>
-                                             <div className="flex gap-4">
-                                                <div className="relative flex-1">
-                                                  <input 
-                                                    type="password" 
-                                                    value={appSettings.groqApiKey}
-                                                    onChange={(e) => setAppSettings({...appSettings, groqApiKey: e.target.value})}
-                                                    placeholder="gsk_internal_production_gateway..."
-                                                    className="w-full bg-black/60 border border-white/10 rounded-2xl px-6 py-5 text-sm font-mono text-blue-400 focus:outline-none focus:border-blue-500/50 focus:ring-8 focus:ring-blue-500/5 transition-all shadow-inner"
-                                                  />
+                                             <div className="flex flex-col gap-3">
+                                                <div className="flex gap-4">
+                                                   <div className="relative flex-1">
+                                                     <input 
+                                                       type="password" 
+                                                       value={appSettings.groqApiKey}
+                                                       onChange={(e) => setAppSettings({...appSettings, groqApiKey: e.target.value})}
+                                                       placeholder="gsk_internal_production_gateway..."
+                                                       className="w-full bg-black/60 border border-white/10 rounded-2xl px-6 py-5 text-sm font-mono text-blue-400 focus:outline-none focus:border-blue-500/50 focus:ring-8 focus:ring-blue-500/5 transition-all shadow-inner"
+                                                     />
+                                                   </div>
+                                                   <button 
+                                                     onClick={() => persistSettings(appSettings)}
+                                                     disabled={isSavingSettings}
+                                                     className="px-8 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 disabled:text-white/50 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border border-blue-500/20 shadow-xl"
+                                                   >
+                                                      {isSavingSettings ? 'SAVING...' : 'SAVE KEY'}
+                                                   </button>
+                                                   <button 
+                                                     onClick={() => {
+                                                       const updatedSettings = {...appSettings, groqApiKey: ''};
+                                                       setAppSettings(updatedSettings);
+                                                       if (isAdmin) {
+                                                         persistSettings(updatedSettings);
+                                                       }
+                                                     }}
+                                                     className="px-8 bg-red-600/5 hover:bg-red-600 text-red-500 hover:text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border border-red-500/10 hover:border-red-600 shadow-xl"
+                                                   >
+                                                      WIPE
+                                                   </button>
                                                 </div>
-                                                <button 
-                                                  onClick={() => setAppSettings({...appSettings, groqApiKey: ''})}
-                                                  className="px-8 bg-red-600/5 hover:bg-red-600 text-red-500 hover:text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border border-red-500/10 hover:border-red-600 shadow-xl"
-                                                >
-                                                   WIPE
-                                                </button>
+                                                <p className="text-[10px] text-white/35 leading-relaxed">
+                                                  {isAdmin
+                                                    ? 'Use SAVE KEY to persist the Groq credential. WIPE clears the stored key immediately.'
+                                                    : 'Unlock Admin mode first, then use SAVE KEY to persist the Groq credential for mapping.'}
+                                                </p>
                                              </div>
                                           </div>
                                        </div>
@@ -2809,6 +2949,109 @@ export default function App() {
                          Enable Full Page Screenshot (Debug)
                        </label>
                     </div>
+                  </div>
+
+                  <div className="rounded-3xl border border-emerald-500/20 bg-emerald-500/5 p-5 space-y-4">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                      <div>
+                        <h3 className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">Load from Harvest File</h3>
+                        <p className="text-[11px] text-white/45 mt-1">Extract all image URLs directly from a previously scraped .md harvest file.</p>
+                      </div>
+                      <div className="flex gap-2">
+                        <select
+                          onChange={(e) => {
+                            if (e.target.value) {
+                              loadHarvestFile(e.target.value);
+                              e.target.value = '';
+                            }
+                          }}
+                          disabled={loadingHarvestFile || harvestFiles.length === 0}
+                          className="px-4 py-2 rounded-xl border border-emerald-500/20 bg-black/40 text-white text-[10px] uppercase tracking-widest font-bold focus:border-emerald-500/50 outline-none disabled:opacity-50"
+                        >
+                          <option value="">Select harvest file...</option>
+                          {harvestFiles.map((file: any, idx: number) => (
+                            <option key={idx} value={file.name}>{file.name}</option>
+                          ))}
+                        </select>
+                        <button
+                          disabled={loadingHarvestFile || harvestFiles.length === 0}
+                          className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-600/40 disabled:text-white/50 text-white text-[10px] uppercase tracking-widest font-black transition-all shadow-lg active:scale-95"
+                        >
+                          {loadingHarvestFile ? 'Loading...' : 'Load'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-3xl border border-cyan-500/20 bg-cyan-500/5 p-5 space-y-4">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                      <div>
+                        <h3 className="text-[10px] font-bold uppercase tracking-widest text-cyan-300">Scraped Image URLs</h3>
+                        <p className="text-[11px] text-white/45 mt-1">Select up to 10 images from the scraped markdown source or load from a harvest file. Export happens locally and does not touch Firebase.</p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <span className="px-3 py-1 rounded-full border border-white/10 bg-black/40 text-[10px] font-bold text-white/60 uppercase tracking-widest">
+                          {selectedImageUrls.length}/10 selected
+                        </span>
+                        <button
+                          onClick={() => setSelectedImageUrls([])}
+                          disabled={selectedImageUrls.length === 0}
+                          className="px-4 py-2 rounded-xl border border-white/10 text-[10px] uppercase tracking-widest font-bold text-white/60 hover:text-white hover:border-white/20 transition-colors disabled:opacity-40"
+                        >
+                          Clear Selection
+                        </button>
+                        <button
+                          onClick={exportSelectedImages}
+                          disabled={selectedImageUrls.length === 0 || isExportingImages}
+                          className="px-5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:bg-cyan-600/40 disabled:text-white/50 text-white text-[10px] uppercase tracking-widest font-black transition-all shadow-lg active:scale-95"
+                        >
+                          {isExportingImages ? 'Exporting...' : `Export Selected (${selectedImageUrls.length})`}
+                        </button>
+                      </div>
+                    </div>
+                    {imageExportError && (
+                      <div className="rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs text-red-200">
+                        {imageExportError}
+                      </div>
+                    )}
+                    {imageUrls.length === 0 ? (
+                      <div className="border border-dashed border-white/10 rounded-2xl py-16 flex flex-col items-center justify-center opacity-30 italic font-bold uppercase tracking-[0.3em] text-xs">
+                        No scraped image URLs yet
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
+                        {imageUrls.map((src, index) => {
+                          const isSelected = selectedImageUrls.includes(src);
+                          const isDisabled = !isSelected && selectedImageUrls.length >= 10;
+                          return (
+                            <button
+                              key={`${src}-${index}`}
+                              type="button"
+                              onClick={() => toggleImageSelection(src)}
+                              disabled={isDisabled}
+                              className={`text-left rounded-2xl border transition-all overflow-hidden group ${isSelected ? 'border-cyan-400 bg-cyan-500/10 ring-2 ring-cyan-400/30' : 'border-white/10 bg-black/40 hover:border-white/20'} ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}`}
+                            >
+                              <div className="relative aspect-square bg-white p-3 flex items-center justify-center">
+                                <img
+                                  src={src}
+                                  alt={`Scraped image ${index + 1}`}
+                                  className="max-w-full max-h-full object-contain"
+                                />
+                                <div className="absolute top-3 left-3 px-2 py-1 rounded-full bg-black/70 text-[9px] font-bold uppercase tracking-widest text-white/80">
+                                  {sanitizeImageSku(imageSku) || 'sku'}-{index + 1}
+                                </div>
+                                <div className={`absolute top-3 right-3 w-7 h-7 rounded-full border flex items-center justify-center transition-colors ${isSelected ? 'bg-cyan-500 border-cyan-300 text-white' : 'bg-black/70 border-white/20 text-white/30 group-hover:text-white/60'}`}>
+                                  {isSelected && <Check className="w-4 h-4" />}
+                                </div>
+                              </div>
+                              <div className="p-3 border-t border-white/10">
+                                <div className="text-[10px] font-mono text-white/50 truncate">{src}</div>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
 
                   <div className="space-y-4 flex-1">

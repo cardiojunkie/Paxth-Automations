@@ -1,22 +1,42 @@
 [
   {
-    "sku": "1",
-    "brand": "12",
-    "ean": "12",
-    "shipping_weight": "3124",
-    "product_type": "141",
+    "sku": "2676143",
+    "brand": "Huawei",
+    "ean": "6942103196676",
+    "shipping_weight": "400",
+    "product_type": "Smartphonw",
     "attribute_set": "Elec-M&W-Smartphones & Tablets",
-    "base_code": "12",
-    "sap_data": "1"
+    "base_code": "2676143",
+    "sap_data": "Product Title                  :HUAWEI NOVA 15 Max 8G+256GB Blush Gold\nDisplay size                   :6.84inches\nDisplay type                   :HD+\nDisplay resolution             :HD+ 1272*2756 pixels\nCapacity                       :256 GB\nRAM                            :8GB\nCam resolution                 :Rear: 50 MP + 2 MP ; Front: 8 MP\nBattery capacity               :8500 mAh (typical)\nOperating system               :EMUI 14.2\nSupported network              :4G LTE (TDD/FDD), 3G WCDMA, 2G GSM\nSIM type                       :Nano-SIM\nNumber of sim supported        :Dual SIM (2 slots)\nCPU                            :Kirin 8000A\nBattery type                   :Li-ion Polymer Battery\nSpecial features               :IP65 water/dust resistance, X Key, HOTA\n                                online update, OTG, Huawei Share\nMobile OS                      :EMUI 14.2\n"
   },
   {
-    "sku": "2",
+    "sku": "2675732",
+    "brand": "Huawei",
+    "ean": "6942103196683",
+    "shipping_weight": "400",
+    "product_type": "Smartphone",
+    "attribute_set": "Elec-M&W-Smartphones & Tablets",
+    "base_code": "2675732",
+    "sap_data": "Product Title                  :HUAWEI NOVA 15 Max 8G+256GB Golden Black\nDisplay size                   :6.84inches\nDisplay type                   :HD+\nDisplay resolution             :HD+ 1272*2756 pixels\nCapacity                       :256 GB\nRAM                            :8GB\nCam resolution                 :Rear: 50 MP + 2 MP ; Front: 8 MP\nBattery capacity               :8500 mAh (typical)\nOperating system               :EMUI 14.2\nSupported network              :4G LTE (TDD/FDD), 3G WCDMA, 2G GSM\nSIM type                       :Nano-SIM\nNumber of sim supported        :Dual SIM (2 slots)\nCPU                            :Kirin 8000A\nBattery type                   :Li-ion Polymer Battery\nSpecial features               :IP65 water/dust resistance, X Key, HOTA\n                                online update, OTG, Huawei Share\nMobile OS                      :EMUI 14.2\n"
+  },
+  {
+    "sku": "2676144",
+    "brand": "Huawei",
+    "ean": "6942103196669",
+    "shipping_weight": "400",
+    "product_type": "Smartphone",
+    "attribute_set": "Elec-M&W-Smartphones & Tablets",
+    "base_code": "2676144",
+    "sap_data": "HUAWEI NOVA 15 Max 8G+256GB Lake Cyan\nDisplay size                   :6.84inches\nDisplay type                   :HD+\nDisplay resolution             :HD+ 1272*2756 pixels\nCapacity                       :256 GB\nRAM                            :8GB\nCam resolution                 :Rear: 50 MP + 2 MP ; Front: 8 MP\nBattery capacity               :8500 mAh (typical)\nOperating system               :EMUI 14.2\nSupported network              :4G LTE (TDD/FDD), 3G WCDMA, 2G GSM\nSIM type                       :Nano-SIM\nNumber of sim supported        :Dual SIM (2 slots)\nCPU                            :Kirin 8000A\nBattery type                   :Li-ion Polymer Battery\nSpecial features               :IP65 water/dust resistance, X Key, HOTA\nonline update, OTG, Huawei Share\nMobile OS                      :EMUI 14.2\n"
+  },
+  {
+    "sku": "1",
     "brand": "",
     "ean": "",
     "shipping_weight": "",
     "product_type": "",
-    "attribute_set": "Elec-LA-Washing Machines",
+    "attribute_set": "Elec-C&A-Laptops",
     "base_code": "",
-    "sap_data": "2"
+    "sap_data": ""
   }
 ]

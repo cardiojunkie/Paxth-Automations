@@ -2,6 +2,8 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
+import dns from "node:dns/promises";
+import net from "node:net";
 import * as cheerio from "cheerio";
 import cors from "cors";
 import multer from "multer";
@@ -40,9 +42,93 @@ type BrowserLike = any;
 
 let browser: BrowserLike | null = null;
 let browserEngine: 'cloakbrowser' | 'playwright' | null = null;
+let activeBrowserTasks = 0;
+const MAX_CONCURRENT_BROWSER_TASKS = Number(process.env.MAX_CONCURRENT_BROWSER_TASKS || 2);
+
+class BusyError extends Error {
+  statusCode: number;
+  constructor(message: string) {
+    super(message);
+    this.statusCode = 503;
+  }
+}
+
+class HttpError extends Error {
+  statusCode: number;
+  constructor(statusCode: number, message: string) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const randomDelay = (min: number, max: number) => delay(Math.floor(Math.random() * (max - min + 1) + min));
+
+const isPrivateIpAddress = (host: string): boolean => {
+  const ipVersion = net.isIP(host);
+  if (ipVersion === 4) {
+    const parts = host.split('.').map(Number);
+    const [a, b] = parts;
+    if (a === 10) return true;
+    if (a === 127) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 0) return true;
+    return false;
+  }
+
+  if (ipVersion === 6) {
+    const normalized = host.toLowerCase();
+    if (normalized === '::1') return true;
+    if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
+    if (normalized.startsWith('fe80')) return true;
+    return false;
+  }
+
+  return false;
+};
+
+const assertSafeTargetUrl = async (inputUrl: string) => {
+  const parsed = new URL(inputUrl);
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('Only http/https URLs are allowed');
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
+    throw new Error('Localhost targets are not allowed');
+  }
+
+  if (net.isIP(host) && isPrivateIpAddress(host)) {
+    throw new Error('Private network targets are not allowed');
+  }
+
+  try {
+    const records = await dns.lookup(host, { all: true });
+    if (records.some((record) => isPrivateIpAddress(record.address))) {
+      throw new Error('Resolved target points to a private network address');
+    }
+  } catch (e: any) {
+    if (e?.message?.includes('private network')) {
+      throw e;
+    }
+    console.warn(`[SERVER] DNS lookup warning for ${host}: ${e?.message || 'lookup failed'}`);
+  }
+};
+
+const withBrowserTask = async <T>(task: () => Promise<T>) => {
+  if (activeBrowserTasks >= MAX_CONCURRENT_BROWSER_TASKS) {
+    throw new BusyError('Server is busy. Please retry in a moment.');
+  }
+
+  activeBrowserTasks += 1;
+  try {
+    return await task();
+  } finally {
+    activeBrowserTasks = Math.max(0, activeBrowserTasks - 1);
+  }
+};
 
 async function getBrowser() {
   if (browser && !browser.isConnected()) {
@@ -118,14 +204,76 @@ turndownService.addRule('clean-attributes', {
 
 turndownService.keep(['table', 'thead', 'tbody', 'tr', 'th', 'td']);
 
-const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
+const buildGroqClient = (apiKey?: string | null) => {
+  const trimmedApiKey = apiKey?.trim();
+  return trimmedApiKey ? new Groq({ apiKey: trimmedApiKey }) : null;
+};
+
+const groq = buildGroqClient(process.env.GROQ_API_KEY);
 
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
-  const ADMIN_KEY = process.env.ADMIN_KEY || '9040';
+  const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
+  const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
 
-  app.use(cors());
+  app.disable('x-powered-by');
+
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    next();
+  });
+
+  const rateState = new Map<string, { count: number; windowStart: number }>();
+  app.use('/api', (req, res, next) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const existing = rateState.get(ip);
+    const windowMs = 60_000;
+    const maxPerWindow = 120;
+
+    if (!existing || now - existing.windowStart > windowMs) {
+      rateState.set(ip, { count: 1, windowStart: now });
+      return next();
+    }
+
+    existing.count += 1;
+    if (existing.count > maxPerWindow) {
+      return res.status(429).json({ error: 'Too many requests. Please retry shortly.' });
+    }
+    return next();
+  });
+
+  app.use(cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (process.env.NODE_ENV !== 'production' && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) {
+        return callback(null, true);
+      }
+      if (CORS_ORIGINS.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error('Origin not allowed by CORS'));
+    },
+    methods: ['GET', 'POST', 'DELETE'],
+    credentials: false
+  }));
+
+  app.use((req, res, next) => {
+    res.setTimeout(120_000, () => {
+      if (!res.headersSent) {
+        res.status(504).json({ error: 'Request timed out' });
+      }
+    });
+    next();
+  });
+
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
@@ -173,7 +321,7 @@ async function startServer() {
       
       // Merge data by SKU, preferring new data for same SKU
       const map = new Map();
-      existingData.forEach(item => {
+      existingData.forEach((item: any) => {
         const skuValue = (item.sku || item.SKU)?.toString();
         if (skuValue) map.set(skuValue, item);
       });
@@ -365,12 +513,13 @@ async function startServer() {
           }
         }
       } catch (e) {
-        console.warn(`[SERVER] Navigation primary attempt failed: ${e.message}`);
+        const navErr = e as Error;
+        console.warn(`[SERVER] Navigation primary attempt failed: ${navErr.message}`);
         // Fallback for protocol errors or timeouts
-        if (e.message.includes('ERR_HTTP2_PROTOCOL_ERROR') || e.message.includes('timeout') || e.message.includes('503')) {
+        if (navErr.message.includes('ERR_HTTP2_PROTOCOL_ERROR') || navErr.message.includes('timeout') || navErr.message.includes('503')) {
            console.log("[SERVER] Retrying with networkidle and extra delay...");
            await randomDelay(3000, 5000);
-           await page.goto(url, { waitUntil: 'networkidle', timeout: 45000 }).catch(err => {
+           await page.goto(url, { waitUntil: 'networkidle', timeout: 45000 }).catch((err: any) => {
              throw new Error(`Critical Navigation Failure: ${err.message}`);
            });
         } else {
@@ -660,7 +809,8 @@ async function startServer() {
         try {
           await context.close();
         } catch (closeError) {
-          console.error(`[SERVER] Failed to close context: ${closeError.message}`);
+          const closeErr = closeError as Error;
+          console.error(`[SERVER] Failed to close context: ${closeErr.message}`);
         }
       }
       throw error;
@@ -686,19 +836,21 @@ async function startServer() {
 
     try {
       try { new URL(sanitizeUrl(url)); } catch (e) { return res.status(400).json({ error: "Invalid URL format" }); }
+      await assertSafeTargetUrl(sanitizeUrl(url));
 
-      const primaryResult = await scrapeTarget({ url: sanitizeUrl(url), selector, extractWithGroq, enableScreenshot, strategy, deepScroll });
+      const primaryResult = await withBrowserTask(() => scrapeTarget({ url: sanitizeUrl(url), selector, extractWithGroq, enableScreenshot, strategy, deepScroll }));
       let secondaryResult = null;
       
       if (secondaryTarget && secondaryTarget.url) {
-        secondaryResult = await scrapeTarget({
+        await assertSafeTargetUrl(sanitizeUrl(secondaryTarget.url));
+        secondaryResult = await withBrowserTask(() => scrapeTarget({
           url: sanitizeUrl(secondaryTarget.url),
           selector: secondaryTarget.selector || selector,
           strategy: secondaryTarget.strategy || strategy,
           extractWithGroq,
           enableScreenshot: enableScreenshot,
           deepScroll: deepScroll
-        });
+        }));
       }
 
       if (sku) {
@@ -730,7 +882,7 @@ async function startServer() {
       });
     } catch (error: any) {
       console.error(`[SERVER] Extraction failed: ${error.message}`);
-      res.status(500).json({ 
+      res.status(error?.statusCode || 500).json({ 
         error: "Extraction Error", 
         details: error.message,
         stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
@@ -745,23 +897,26 @@ async function startServer() {
     
     url = sanitizeUrl(url);
     try { new URL(url); } catch(e) { return res.status(400).json({ error: "Invalid URL format" }); }
+    await assertSafeTargetUrl(url);
 
     let context: any = null;
     try {
-      console.log(`[SERVER] Discovery Mode Starting: ${url}`);
-      const browserInstance = await getBrowser();
-      context = await browserInstance.newContext();
-      const page = await context.newPage();
-      
-      try {
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      } catch (e) {
-        console.warn(`[SERVER] Discovery navigation warning: ${e.message}`);
-      }
+      const links = await withBrowserTask(async () => {
+        console.log(`[SERVER] Discovery Mode Starting: ${url}`);
+        const browserInstance = await getBrowser();
+        context = await browserInstance.newContext();
+        const page = await context.newPage();
+        
+        try {
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        } catch (e) {
+          const navWarn = e as Error;
+          console.warn(`[SERVER] Discovery navigation warning: ${navWarn.message}`);
+        }
 
-      await page.waitForTimeout(1500);
-      
-      const links = (await page.evaluate(`
+        await page.waitForTimeout(1500);
+        
+        const pageLinks = (await page.evaluate(`
         (() => {
           const selector = ${linkSelector ? JSON.stringify(linkSelector) : 'null'};
           let elements = selector ? Array.from(document.querySelectorAll(selector)) : Array.from(document.querySelectorAll('a[href]'));
@@ -780,6 +935,10 @@ async function startServer() {
             .filter(link => link.href && (link.href.startsWith('http') || link.href.startsWith('/')));
         })()
       `)) as any[];
+        await context.close();
+        context = null;
+        return pageLinks;
+      });
 
       // Normalize links
       const urlObj = new URL(url);
@@ -790,17 +949,17 @@ async function startServer() {
         return link;
       }).filter((v, i, a) => a.findIndex(t => t.href === v.href) === i); // Deduplicate
 
-      await context.close();
       res.json({ success: true, links: normalizedLinks });
     } catch (error: any) {
       if (context) {
         try {
           await context.close();
         } catch (closeError) {
-          console.error(`[SERVER] Failed to close discovery context: ${closeError.message}`);
+          const closeErr = closeError as Error;
+          console.error(`[SERVER] Failed to close discovery context: ${closeErr.message}`);
         }
       }
-      res.status(500).json({ error: "Discovery Error", details: error.message });
+      res.status(error?.statusCode || 500).json({ error: "Discovery Error", details: error.message });
     }
   });
 
@@ -923,17 +1082,22 @@ async function startServer() {
         if (!url) return res.status(400).json({ error: "URL is required" });
         url = sanitizeUrl(url);
         try { new URL(url); } catch(e) { return res.status(400).json({ error: "Invalid URL format" }); }
+        await assertSafeTargetUrl(url);
         
-        res.json(await performInspection(url, req.body.deepScroll));
+        res.json(await withBrowserTask(() => performInspection(url, req.body.deepScroll)));
     } catch (error: any) {
-        res.status(500).json({ error: "Inspection failed", details: error.message });
+        res.status(error?.statusCode || 500).json({ error: "Inspection failed", details: error.message });
     }
   });
 
   app.post("/api/analyze", async (req, res) => {
     const { url, deepScroll } = req.body;
     try {
-        const data = await performInspection(url, deepScroll);
+        if (!url) return res.status(400).json({ error: "URL is required" });
+        const safeUrl = sanitizeUrl(url);
+        try { new URL(safeUrl); } catch(e) { return res.status(400).json({ error: "Invalid URL format" }); }
+        await assertSafeTargetUrl(safeUrl);
+        const data = await withBrowserTask(() => performInspection(safeUrl, deepScroll));
         
         const prompt = `
             You are a Web Scraping Expert. Analyze the following DOM structure and metadata from a product page.
@@ -960,7 +1124,12 @@ async function startServer() {
             - "reasoning": string (short description of why these were chosen)
         `;
 
-        const chatCompletion = await groq.chat.completions.create({
+        const groqClient = await resolveGroqClient();
+        if (!groqClient) {
+          throw new Error("Groq API Key is not configured. Please add it in Connectivity settings.");
+        }
+
+        const chatCompletion = await groqClient.chat.completions.create({
             messages: [{ role: "user", content: prompt }],
             model: "llama-3.3-70b-versatile",
             response_format: { type: "json_object" }
@@ -971,7 +1140,7 @@ async function startServer() {
 
         res.json({ ...data, ...result });
     } catch (error: any) {
-        res.status(500).json({ error: "Analysis failed", details: error.message });
+        res.status(error?.statusCode || 500).json({ error: "Analysis failed", details: error.message });
     }
   });
 
@@ -993,7 +1162,7 @@ async function startServer() {
       const skus = await dbService.getSkuIndex();
       const harvests = (await dbService.listHarvests()).map(h => h.name);
       
-      const jobs = await Promise.all(skus.map(async product => {
+      const jobs = await Promise.all(skus.map(async (product: any) => {
         // Find matching SKU in filenames (allowing for some fuzzy underscore match)
         const safeSku = product.sku.toString().replace(/[^a-z0-9_-]/gi, '_');
         const hasHarvest = harvests.includes(`${safeSku}.md`);
@@ -1083,7 +1252,8 @@ async function startServer() {
       }
       
       let outputData = null;
-      if (currentGroq) {
+      const groqClient = await resolveGroqClient(settings);
+      if (groqClient) {
           const prompt = `
             TASK: High-Precision Product Specification Mapping
             SKU: ${sku}
@@ -1110,7 +1280,7 @@ async function startServer() {
           `;
           
           try {
-            const groqResponse = await currentGroq.chat.completions.create({
+            const groqResponse = await groqClient.chat.completions.create({
               messages: [{ role: "user", content: prompt }],
               model: aiModel || "llama-3.3-70b-versatile",
               response_format: { type: "json_object" }
@@ -1282,6 +1452,21 @@ async function startServer() {
     }
   }
 
+  async function resolveGroqClient(settingsOverride?: any) {
+    if (currentGroq) {
+      return currentGroq;
+    }
+
+    const settings = settingsOverride || await loadSettings();
+    const persistedGroq = buildGroqClient(settings?.groqApiKey);
+    if (persistedGroq) {
+      currentGroq = persistedGroq;
+      return currentGroq;
+    }
+
+    return groq;
+  }
+
   app.get('/api/admin/status', (req, res) => {
     res.json({ adminConfigured: !!ADMIN_KEY });
   });
@@ -1302,7 +1487,7 @@ async function startServer() {
   app.post('/api/admin/login', (req, res) => {
     const { key } = req.body || {};
     if (!ADMIN_KEY) {
-      return res.status(500).json({ error: 'ADMIN_KEY is not configured on the server.' });
+      return res.status(403).json({ error: 'ADMIN_KEY is not configured on the server.' });
     }
     if (key === ADMIN_KEY) {
       return res.json({ success: true });
@@ -1321,8 +1506,7 @@ async function startServer() {
       }
       const settings = req.body;
       await dbService.saveSettings(settings);
-      if (settings.groqApiKey) currentGroq = new Groq({ apiKey: settings.groqApiKey });
-      else currentGroq = groq;
+      currentGroq = buildGroqClient(settings.groqApiKey) || groq;
       res.json({ success: true });
     } catch (e) {
       res.status(500).json({ error: "Failed to save settings" });
@@ -1344,6 +1528,10 @@ async function startServer() {
     }
 
     try {
+      const safeUrl = sanitizeUrl(url);
+      await assertSafeTargetUrl(safeUrl);
+
+      const result = await withBrowserTask(async () => {
       const b = await getBrowser();
       const context = await b.newContext({
         userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -1352,7 +1540,7 @@ async function startServer() {
       const page = await context.newPage();
 
       // Block unnecessary resources to speed up page load but allow images
-      await page.route("**/*", (route) => {
+      await page.route("**/*", (route: any) => {
         const type = route.request().resourceType();
         if (["stylesheet", "font", "media"].includes(type)) {
           route.abort();
@@ -1362,7 +1550,7 @@ async function startServer() {
       });
 
       console.log(`[IMAGE SOURCER] Navigating to ${url}...`);
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.goto(safeUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
       
       // Wait a bit for dynamic images
       await delay(2000);
@@ -1450,13 +1638,13 @@ async function startServer() {
       await context.close();
 
       if (extractedUrls.length === 0) {
-        return res.status(404).json({ error: "No product images found on URL", screenshotPath });
+        throw new HttpError(404, `No product images found on URL${screenshotPath ? ` (screenshot: ${screenshotPath})` : ''}`);
       }
 
       console.log(`[IMAGE SOURCER] Found ${extractedUrls.length} image candidates. Evaluating quality...`);
 
       // Sort candidates by score (isGallery gives a boost, area directly adds)
-      const sortedCandidates = extractedUrls.sort((a, b) => {
+      const sortedCandidates = extractedUrls.sort((a: any, b: any) => {
          const scoreA = a.area * (a.isGallery ? 3 : 1);
          const scoreB = b.area * (b.isGallery ? 3 : 1);
          return scoreB - scoreA;
@@ -1505,7 +1693,7 @@ async function startServer() {
       }
 
       if (validImages.length === 0) {
-        return res.status(404).json({ error: "Could not download any valid high-quality product images", screenshotPath });
+        throw new HttpError(404, `Could not download any valid high-quality product images${screenshotPath ? ` (screenshot: ${screenshotPath})` : ''}`);
       }
 
       // Sort by sizeScore descending
@@ -1544,14 +1732,70 @@ async function startServer() {
 
       console.log(`[IMAGE SOURCER] Saved ${finalImages.length} formatted images.`);
 
-      res.json({ 
+      return ({ 
         success: true, 
         images: responseImages
       });
+      });
+
+      res.json(result);
 
     } catch (error: any) {
       console.error("[IMAGE SOURCER] Error:", error);
-      res.status(500).json({ error: "Failed to extract image", details: error.message });
+      res.status(error?.statusCode || 500).json({ error: "Failed to extract image", details: error.message });
+    }
+  });
+
+  app.post("/api/images/render", async (req, res) => {
+    const { sku, url } = req.body || {};
+    console.log('[IMAGE RENDER] Request:', { sku, url });
+    
+    if (!sku || !url) {
+      console.error('[IMAGE RENDER] Missing required params');
+      return res.status(400).json({ error: "SKU and image URL are required" });
+    }
+
+    try {
+      await assertSafeTargetUrl(sanitizeUrl(url));
+      console.log('[IMAGE RENDER] Fetching source image...');
+      const sourceResponse = await fetch(sanitizeUrl(url));
+      if (!sourceResponse.ok) {
+        const error = `Failed to fetch image (${sourceResponse.status})`;
+        console.error('[IMAGE RENDER]', error);
+        return res.status(502).json({ error });
+      }
+
+      const contentType = sourceResponse.headers.get('content-type') || '';
+      console.log('[IMAGE RENDER] Content-Type:', contentType);
+      
+      if (!contentType.startsWith('image/') || contentType.includes('svg')) {
+        const error = 'Selected URL is not a supported raster image';
+        console.error('[IMAGE RENDER]', error);
+        return res.status(400).json({ error });
+      }
+
+      console.log('[IMAGE RENDER] Processing image with Sharp...');
+      const imageBuffer = Buffer.from(await sourceResponse.arrayBuffer());
+      const renderedBuffer = await sharp(imageBuffer)
+        .trim({ threshold: 10 })
+        .resize({
+          width: 1500,
+          height: 1500,
+          fit: 'contain',
+          background: { r: 255, g: 255, b: 255, alpha: 1 }
+        })
+        .flatten({ background: { r: 255, g: 255, b: 255 } })
+        .jpeg({ quality: 90 })
+        .toBuffer();
+
+      const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
+      console.log('[IMAGE RENDER] Success! Sending image...');
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeSku}.jpg"`);
+      res.send(renderedBuffer);
+    } catch (error: any) {
+      console.error('[IMAGE SOURCER] Render failed:', error);
+      res.status(500).json({ error: 'Failed to prepare JPG export', details: error.message });
     }
   });
 
@@ -1603,9 +1847,26 @@ async function startServer() {
     });
   });
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
   });
+
+  const shutdown = async (signal: string) => {
+    console.log(`[SERVER] Received ${signal}, shutting down gracefully...`);
+    server.close(async () => {
+      if (browser) {
+        try {
+          await browser.close();
+        } catch (e) {
+          console.error('[SERVER] Error while closing browser:', e);
+        }
+      }
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on('SIGINT', () => void shutdown('SIGINT'));
 }
 
 startServer().catch(err => {
