@@ -8,6 +8,7 @@ RUN npm ci
 FROM deps AS build
 WORKDIR /app
 COPY . .
+RUN mkdir -p /app/public
 RUN npm run build
 
 FROM mcr.microsoft.com/playwright:v1.59.1-noble AS runner
