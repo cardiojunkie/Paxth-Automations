@@ -1,0 +1,22 @@
+[
+  {
+    "sku": "1",
+    "brand": "12",
+    "ean": "12",
+    "shipping_weight": "3124",
+    "product_type": "141",
+    "attribute_set": "Elec-M&W-Smartphones & Tablets",
+    "base_code": "12",
+    "sap_data": "1"
+  },
+  {
+    "sku": "2",
+    "brand": "",
+    "ean": "",
+    "shipping_weight": "",
+    "product_type": "",
+    "attribute_set": "Elec-LA-Washing Machines",
+    "base_code": "",
+    "sap_data": "2"
+  }
+]

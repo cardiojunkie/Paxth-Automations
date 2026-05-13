@@ -57,6 +57,15 @@ interface LogEntry {
   timestamp: string;
 }
 
+interface FirestoreHealth {
+  mode: string;
+  connected: boolean;
+  projectId?: string | null;
+  databaseId?: string | null;
+  authSource?: string | null;
+  initError?: string | null;
+}
+
 const PresetDropdown = ({ presets, onSelect, onDelete, defaultText, disabled, isPlp = false }: {
   presets: any[];
   onSelect: (item: any) => void;
@@ -115,7 +124,18 @@ const PresetDropdown = ({ presets, onSelect, onDelete, defaultText, disabled, is
 };
 
 export default function App() {
-  const [currentModule, setCurrentModule] = useState<'sku-indexer' | 'scrapper' | 'jobs' | 'images' | 'settings' | 'admin'>('scrapper');
+  const defaultSelectorPresets = [
+    {
+      name: "Amazon Global Profile",
+      selector: 'link[rel="canonical"], #titleSection, #corePriceDisplay_desktop_feature_div, #productOverview_feature_div, #feature-bullets, #productDetails_feature_div, #altImages',
+      strategy: "LLMExtractionStrategy"
+    }
+  ];
+  const defaultPlpPresets = [
+    { name: "Standard Product List", selector: ".product-item a, .product-card a" }
+  ];
+
+  const [currentModule, setCurrentModule] = useState<'sku-indexer' | 'scrapper' | 'jobs' | 'images' | 'settings'>('scrapper');
   const [settingsSubModule, setSettingsSubModule] = useState<'api' | 'mapping' | 'indexer'>('api');
   const [editingGenerator, setEditingGenerator] = useState<string | null>(null);
   const [editingSetRules, setEditingSetRules] = useState<number | null>(null);
@@ -128,8 +148,14 @@ export default function App() {
     description: "", 
     keywords: "",
     groqApiKey: "",
-    attributeSets: [] as {name: string, fields: string[], mdRules?: string, mdFileName?: string}[] 
+    attributeSets: [] as {name: string, fields: string[], mdRules?: string, mdFileName?: string}[],
+    selectorPresets: [] as {name: string, selector: string, strategy: string}[],
+    plpSelectorPresets: [] as {name: string, selector: string}[]
   });
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminConfigured, setAdminConfigured] = useState(true);
+  const [firestoreHealth, setFirestoreHealth] = useState<FirestoreHealth | null>(null);
+  const [isFirestoreStatusLoading, setIsFirestoreStatusLoading] = useState(true);
   const [newAttrName, setNewAttrName] = useState('');
   const [newAttrFields, setNewAttrFields] = useState('');
   const [mode, setMode] = useState<'single' | 'batch' | 'deep'>('single');
@@ -165,25 +191,6 @@ export default function App() {
     base_code: '',
     sap_data: ''
   });
-  
-  // Admin Allowlist state
-  const [allowlist, setAllowlist] = useState<any[]>([]);
-  const [newAllowlistEmail, setNewAllowlistEmail] = useState('');
-  const [newAllowlistRole, setNewAllowlistRole] = useState('user');
-  
-  const fetchAllowlist = async () => {
-    try {
-      const res = await apiFetch('/api/allowlist');
-      if (res.ok) setAllowlist(await res.json());
-    } catch (e) { console.error('Failed to fetch allowlist', e); }
-  };
-  
-  // Try fetching allowlist if admin on mount
-  useEffect(() => {
-    if ((window as any)._userRole === 'admin') {
-      fetchAllowlist();
-    }
-  }, []);
   
   // Sync core data
   useEffect(() => {
@@ -288,6 +295,41 @@ export default function App() {
   const [discoveryMode, setDiscoveryMode] = useState(false);
   const [isDiscovering, setIsDiscovering] = useState(false);
 
+  const verifyAdminKey = async (candidate: string) => {
+    try {
+      const res = await apiFetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: candidate })
+      });
+      if (!res.ok) return false;
+      (window as any)._adminKey = candidate;
+      localStorage.setItem('moos_admin_key', candidate);
+      setIsAdmin(true);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const requestAdminUnlock = async () => {
+    const key = window.prompt('Enter admin key');
+    if (!key) return;
+    const ok = await verifyAdminKey(key.trim());
+    if (ok) {
+      addLog('success', 'Admin mode unlocked.');
+    } else {
+      addLog('error', 'Invalid admin key.');
+    }
+  };
+
+  const lockAdminMode = () => {
+    setIsAdmin(false);
+    (window as any)._adminKey = null;
+    localStorage.removeItem('moos_admin_key');
+    addLog('system', 'Admin mode locked.');
+  };
+
   const [imageSku, setImageSku] = useState('');
   const [imageUrl, setImageUrl] = useState('');
   const [imageScreenshotEnabled, setImageScreenshotEnabled] = useState(false);
@@ -345,45 +387,64 @@ export default function App() {
     { type: 'system', message: 'PaXth Engine initialized (Playwright Mode). System standby.', timestamp: new Date().toLocaleTimeString() }
   ]);
 
-  // Load saved selectors from localStorage on mount
+  // Load admin status and attempt auto-unlock from local storage
   useEffect(() => {
-    const saved = localStorage.getItem('paxth_selectors');
-    if (saved) {
-      try {
-        setSavedSelectors(JSON.parse(saved));
-      } catch (e) {
-        console.error("Failed to load selectors", e);
-      }
-    } else {
-      // Default presets if empty
-      const defaultPresets = [
-        { 
-          name: "Amazon Global Profile", 
-          selector: 'link[rel="canonical"], #titleSection, #corePriceDisplay_desktop_feature_div, #productOverview_feature_div, #feature-bullets, #productDetails_feature_div, #altImages', 
-          strategy: "LLMExtractionStrategy" 
-        }
-      ];
-      setSavedSelectors(defaultPresets);
-      localStorage.setItem('paxth_selectors', JSON.stringify(defaultPresets));
-    }
+    apiFetch('/api/admin/status')
+      .then(async (res) => {
+        const data = await res.json();
+        setAdminConfigured(!!data.adminConfigured);
+      })
+      .catch(() => setAdminConfigured(false));
 
-    const savedPlp = localStorage.getItem('paxth_plp_selectors');
-    if (savedPlp) {
-      try {
-        setSavedPlpSelectors(JSON.parse(savedPlp));
-      } catch (e) {
-        console.error("Failed to load PLP selectors", e);
-      }
-    } else {
-      const defaultPlp = [
-        { name: "Standard Product List", selector: ".product-item a, .product-card a" }
-      ];
-      setSavedPlpSelectors(defaultPlp);
-      localStorage.setItem('paxth_plp_selectors', JSON.stringify(defaultPlp));
+    const cachedKey = localStorage.getItem('moos_admin_key');
+    if (cachedKey) {
+      verifyAdminKey(cachedKey);
     }
   }, []);
 
+  useEffect(() => {
+    let mounted = true;
+
+    const fetchFirestoreHealth = async () => {
+      try {
+        const res = await apiFetch('/api/health/firestore');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (mounted && data?.firestore) {
+          setFirestoreHealth(data.firestore);
+        }
+      } catch {
+        if (mounted) {
+          setFirestoreHealth(null);
+        }
+      } finally {
+        if (mounted) {
+          setIsFirestoreStatusLoading(false);
+        }
+      }
+    };
+
+    fetchFirestoreHealth();
+    const interval = window.setInterval(fetchFirestoreHealth, 30000);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
+    const selectorPresets = appSettings.selectorPresets?.length > 0 ? appSettings.selectorPresets : defaultSelectorPresets;
+    const plpPresets = appSettings.plpSelectorPresets?.length > 0 ? appSettings.plpSelectorPresets : defaultPlpPresets;
+    setSavedSelectors(selectorPresets);
+    setSavedPlpSelectors(plpPresets);
+  }, [appSettings.selectorPresets, appSettings.plpSelectorPresets]);
+
   const saveSelector = () => {
+    if (!isAdmin) {
+      addLog('error', 'Admin mode required to save selector presets.');
+      return;
+    }
     if (!tempSelectorName || !selector) return;
     const newSelectors = [...savedSelectors, { 
       name: tempSelectorName, 
@@ -391,26 +452,40 @@ export default function App() {
       strategy 
     }];
     setSavedSelectors(newSelectors);
-    localStorage.setItem('paxth_selectors', JSON.stringify(newSelectors));
+    const updatedSettings = { ...appSettings, selectorPresets: newSelectors };
+    setAppSettings(updatedSettings);
+    persistSettings(updatedSettings);
     setTempSelectorName('');
     setShowSaveDialog(false);
     addLog('success', `Extraction Profile "${tempSelectorName}" saved.`);
   };
 
   const deleteSelector = (index: number) => {
+    if (!isAdmin) {
+      addLog('error', 'Admin mode required to delete selector presets.');
+      return;
+    }
     const newSelectors = savedSelectors.filter((_, i) => i !== index);
     setSavedSelectors(newSelectors);
-    localStorage.setItem('paxth_selectors', JSON.stringify(newSelectors));
+    const updatedSettings = { ...appSettings, selectorPresets: newSelectors };
+    setAppSettings(updatedSettings);
+    persistSettings(updatedSettings);
   };
 
   const savePlpSelector = () => {
+    if (!isAdmin) {
+      addLog('error', 'Admin mode required to save PLP presets.');
+      return;
+    }
     if (!tempPlpSelectorName || !plpSelector) return;
     const newSelectors = [...savedPlpSelectors, { 
       name: tempPlpSelectorName, 
       selector: plpSelector
     }];
     setSavedPlpSelectors(newSelectors);
-    localStorage.setItem('paxth_plp_selectors', JSON.stringify(newSelectors));
+    const updatedSettings = { ...appSettings, plpSelectorPresets: newSelectors };
+    setAppSettings(updatedSettings);
+    persistSettings(updatedSettings);
     setTempPlpSelectorName('');
     setShowSavePlpDialog(false);
     addLog('success', `PLP Preset "${tempPlpSelectorName}" saved.`);
@@ -480,12 +555,12 @@ export default function App() {
           const contentType = response.headers.get("content-type");
           if (!response.ok || !contentType?.includes("application/json")) {
             const text = await response.text();
+            let errorMsg = `HTTP ${response.status} on ${item.sku}`;
             try {
               const errData = JSON.parse(text);
-              throw new Error(errData.details || errData.error || `HTTP ${response.status}`);
-            } catch (e) {
-              throw new Error(`Critical Error (${response.status}) on ${item.sku}`);
-            }
+              errorMsg = errData.details || errData.error || errorMsg;
+            } catch { /* response was not JSON */ }
+            throw new Error(errorMsg);
           }
           
           const data = await response.json();
@@ -629,43 +704,16 @@ export default function App() {
     }
   };
 
-  const handleAddAllowlist = async () => {
-    if (!newAllowlistEmail) return;
-    try {
-      const res = await apiFetch('/api/allowlist', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: newAllowlistEmail, role: newAllowlistRole })
-      });
-      if (res.ok) {
-        setNewAllowlistEmail('');
-        fetchAllowlist();
-        addLog('success', `Added ${newAllowlistEmail} to allowlist.`);
-      }
-    } catch(e) {
-      addLog('error', 'Failed to add user to allowlist.');
-    }
-  };
-
-  const handleRemoveAllowlist = async (email: string) => {
-    try {
-      const res = await apiFetch(`/api/allowlist/${encodeURIComponent(email)}`, { method: 'DELETE' });
-      if (res.ok) {
-        fetchAllowlist();
-        addLog('success', `Removed ${email} from allowlist.`);
-      } else {
-        const d = await res.json();
-        addLog('error', d.error || 'Failed to remove user');
-      }
-    } catch(e) {
-      addLog('error', 'Failed to remove user.');
-    }
-  };
-
   const deletePlpSelector = (index: number) => {
+    if (!isAdmin) {
+      addLog('error', 'Admin mode required to delete PLP presets.');
+      return;
+    }
     const newSelectors = savedPlpSelectors.filter((_, i) => i !== index);
     setSavedPlpSelectors(newSelectors);
-    localStorage.setItem('paxth_plp_selectors', JSON.stringify(newSelectors));
+    const updatedSettings = { ...appSettings, plpSelectorPresets: newSelectors };
+    setAppSettings(updatedSettings);
+    persistSettings(updatedSettings);
   };
   const [viewingOutput, setViewingOutput] = useState<any | null>(null);
   const [editingOutputSku, setEditingOutputSku] = useState<string | null>(null);
@@ -763,6 +811,15 @@ export default function App() {
   };
 
   const persistSettings = async (settings: any) => {
+    if (!isAdmin) {
+      addLog('error', 'Only admin can modify schemas, mapping logic, and presets.');
+      const res = await apiFetch('/api/settings');
+      if (res.ok) {
+        const fresh = await res.json();
+        setAppSettings(prev => ({ ...prev, ...fresh }));
+      }
+      return;
+    }
     try {
       addLog('wait', 'Initiating neural nexus sync...');
       const res = await apiFetch('/api/settings', {
@@ -831,12 +888,14 @@ export default function App() {
       if (!response.ok || !contentType?.includes("application/json")) {
         const text = await response.text();
         console.error("Server error response:", text);
+        let errorMsg = `Scrape failed (HTTP ${response.status}). The site may be blocking the request or the server timed out.`;
         try {
           const errorData = JSON.parse(text);
-          throw new Error(errorData.details || errorData.error || 'Scraping failed');
-        } catch (e) {
-          throw new Error(`Server returned non-JSON response (${response.status}). The site might be blocking us or the request timed out.`);
+          errorMsg = errorData.details || errorData.error || errorMsg;
+        } catch {
+          // response was not JSON at all — keep default message
         }
+        throw new Error(errorMsg);
       }
       
       const data = await response.json();
@@ -1059,10 +1118,50 @@ export default function App() {
           </h1>
         </div>
         <div className="flex items-center gap-6">
+          <button
+            onClick={isAdmin ? lockAdminMode : requestAdminUnlock}
+            className={`text-[10px] px-3 py-1.5 rounded border uppercase tracking-widest font-bold transition-colors ${isAdmin ? 'border-green-500/40 text-green-400 hover:bg-green-500/10' : 'border-white/20 text-white/50 hover:text-white/80 hover:border-white/40'}`}
+            title={adminConfigured ? 'Admin access controls schema and preset changes' : 'Set ADMIN_KEY on server to enable admin controls'}
+          >
+            {isAdmin ? 'Admin Unlocked' : 'Admin Locked'}
+          </button>
           <div className="flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${isScraping ? 'bg-blue-500 animate-pulse' : 'bg-green-500 status-pulse'} shadow-[0_0_8px_rgba(34,197,94,0.5)]`}></div>
             <span className={`text-[10px] ${isScraping ? 'text-blue-500' : 'text-green-500'} font-mono tracking-wider uppercase`}>
               {isScraping ? 'Engine Busy' : 'Engine Active'}
+            </span>
+          </div>
+          <div
+            className={`flex items-center gap-2 px-2.5 py-1 rounded border ${
+              isFirestoreStatusLoading
+                ? 'border-white/15 text-white/50'
+                : firestoreHealth?.connected
+                  ? 'border-emerald-500/30 text-emerald-400'
+                  : 'border-red-500/30 text-red-400'
+            }`}
+            title={
+              isFirestoreStatusLoading
+                ? 'Checking Firestore...'
+                : firestoreHealth
+                  ? `Mode: ${firestoreHealth.mode} | Project: ${firestoreHealth.projectId || 'n/a'} | DB: ${firestoreHealth.databaseId || '(default)'} | Auth: ${firestoreHealth.authSource || 'n/a'}${firestoreHealth.initError ? ` | Error: ${firestoreHealth.initError}` : ''}`
+                  : 'Firestore health unavailable'
+            }
+          >
+            <div
+              className={`w-2 h-2 rounded-full ${
+                isFirestoreStatusLoading
+                  ? 'bg-white/40 animate-pulse'
+                  : firestoreHealth?.connected
+                    ? 'bg-emerald-400 status-pulse'
+                    : 'bg-red-400'
+              }`}
+            ></div>
+            <span className="text-[10px] font-mono tracking-wider uppercase">
+              {isFirestoreStatusLoading
+                ? 'Firebase: Checking'
+                : firestoreHealth?.connected
+                  ? 'Firebase: Live'
+                  : 'Firebase: Fallback'}
             </span>
           </div>
           <div className="h-6 w-px bg-white/10"></div>
@@ -1115,17 +1214,6 @@ export default function App() {
             <Settings className="w-6 h-6" />
             <div className="absolute left-full ml-4 px-2 py-1 bg-zinc-900 border border-white/10 rounded text-[10px] font-bold text-white opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">Configuration</div>
           </button>
-
-          {(window as any)._userRole === 'admin' && (
-            <button 
-              onClick={() => setCurrentModule('admin')}
-              className={`p-3 rounded-xl transition-all group relative mt-auto ${currentModule === 'admin' ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-600/40' : 'text-white/30 hover:bg-white/5'}`}
-              title="Admin Panel"
-            >
-              <Key className="w-6 h-6" />
-              <div className="absolute left-full ml-4 px-2 py-1 bg-zinc-900 border border-white/10 rounded text-[10px] font-bold text-white opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">Admin Panel</div>
-            </button>
-          )}
         </aside>
 
         {/* SECONDARY PANEL: CONFIGURATION */}
@@ -2769,69 +2857,6 @@ export default function App() {
                     )}
                   </div>
                </div>
-             ) : currentModule === 'admin' ? (
-                <div className="flex-1 flex flex-col gap-6 w-full max-w-4xl mx-auto py-8">
-                  <div className="flex justify-between items-end">
-                    <div>
-                        <h2 className="text-2xl font-bold tracking-tight">Allowlist Control</h2>
-                        <p className="text-[11px] text-white/40 uppercase tracking-widest mt-1">Manage Application Access Permissions</p>
-                    </div>
-                  </div>
-                  
-                  <div className="bg-[#0a0a0a] border border-white/5 rounded-3xl p-8 shadow-2xl space-y-6">
-                    <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 bg-indigo-600/10 border border-indigo-500/20 rounded-2xl flex items-center justify-center">
-                        <Key className="w-5 h-5 text-indigo-400" />
-                      </div>
-                      <div className="flex-1 flex gap-4">
-                         <input 
-                           type="email"
-                           value={newAllowlistEmail}
-                           onChange={(e) => setNewAllowlistEmail(e.target.value)}
-                           onKeyDown={(e) => e.key === 'Enter' && handleAddAllowlist()}
-                           className="flex-1 bg-black/60 border border-white/10 rounded-2xl px-6 py-4 text-sm font-mono text-blue-400 focus:outline-none focus:border-indigo-500/50 transition-all shadow-inner placeholder:text-white/20"
-                           placeholder="user@example.com"
-                         />
-                         <select 
-                           value={newAllowlistRole}
-                           onChange={(e) => setNewAllowlistRole(e.target.value)}
-                           className="w-40 bg-black/60 border border-white/10 rounded-2xl px-6 py-4 text-sm font-mono text-blue-400 focus:outline-none focus:border-indigo-500/50 transition-all shadow-inner appearance-none cursor-pointer"
-                         >
-                            <option value="user">User</option>
-                            <option value="admin">Admin</option>
-                         </select>
-                         <button 
-                           onClick={handleAddAllowlist}
-                           className="px-8 bg-indigo-600 hover:bg-indigo-500 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest transition-all shadow-lg active:scale-95 flex items-center gap-2"
-                         >
-                           <Plus className="w-4 h-4" /> ADD
-                         </button>
-                      </div>
-                    </div>
-
-                    <div className="mt-8 border border-white/5 rounded-2xl overflow-hidden bg-black/40">
-                      <div className="grid grid-cols-[1fr_1fr_auto] px-6 py-4 border-b border-white/10 bg-white/5 text-[10px] font-bold text-white/40 uppercase tracking-widest">
-                        <div>Email</div>
-                        <div>Role</div>
-                        <div>Action</div>
-                      </div>
-                      {allowlist.length > 0 ? allowlist.map((u, i) => (
-                         <div key={i} className="grid grid-cols-[1fr_1fr_auto] items-center px-6 py-4 border-b border-white/5 last:border-0 hover:bg-white/[0.02]">
-                            <div className="font-mono text-sm text-white/90">{u.email}</div>
-                            <div className="text-xs uppercase font-bold tracking-widest text-indigo-400">{u.role}</div>
-                            <button 
-                              onClick={() => handleRemoveAllowlist(u.email)}
-                              className="w-8 h-8 rounded-lg bg-red-500/10 hover:bg-red-500 text-red-500 hover:text-white transition-all flex items-center justify-center opacity-50 hover:opacity-100"
-                            >
-                               <Trash2 className="w-4 h-4" />
-                            </button>
-                         </div>
-                      )) : (
-                         <div className="py-12 text-center text-white/30 text-[11px] uppercase tracking-widest">No entries found</div>
-                      )}
-                    </div>
-                  </div>
-                </div>
              ) : null}
           </div>
 

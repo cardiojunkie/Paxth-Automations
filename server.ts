@@ -10,16 +10,11 @@ const __require = createRequire(import.meta.url);
 const pdfParse = __require("pdf-parse");
 import Groq from "groq-sdk";
 import TurndownService from "turndown";
-import { Browser, BrowserContext } from "playwright";
-import { chromium } from "playwright-extra";
-import stealthPlugin from "puppeteer-extra-plugin-stealth";
-import admin from "firebase-admin";
+import { launch } from "cloakbrowser";
+import { chromium as playwrightChromium } from "playwright";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
-const stealth = stealthPlugin();
-chromium.use(stealth);
 
 import fs from "fs";
 import { dbService } from "./src/services/db.js";
@@ -41,35 +36,55 @@ const IMAGES_DIR = path.join(process.cwd(), 'public', 'images');
   }
 });
 
-let browser: Browser | null = null;
+type BrowserLike = any;
+
+let browser: BrowserLike | null = null;
+let browserEngine: 'cloakbrowser' | 'playwright' | null = null;
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const randomDelay = (min: number, max: number) => delay(Math.floor(Math.random() * (max - min + 1) + min));
 
 async function getBrowser() {
   if (browser && !browser.isConnected()) {
-    console.log("[SERVER] Browser disconnected, cleaning up...");
+    console.log(`[SERVER] ${browserEngine || 'browser'} instance disconnected, cleaning up...`);
     try {
       await browser.close();
     } catch (e) {}
     browser = null;
+    browserEngine = null;
   }
 
   if (!browser) {
-    console.log("[SERVER] Launching Chromium browser with stealth mode...");
-    browser = await chromium.launch({
-      headless: true, // You can set this to false if you want to see the browser temporarily for debugging
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-http2", // Fix for ERR_HTTP2_PROTOCOL_ERROR on sites like Noon
-        "--disable-blink-features=AutomationControlled",
-        "--window-size=1920,1080",
-        "--disable-infobars",
-        "--disable-extensions",
-        "--mute-audio"
-      ]
-    });
+    const launchArgs = [
+      "--disable-http2", // Fix for ERR_HTTP2_PROTOCOL_ERROR on sites like Noon
+      "--window-size=1920,1080",
+      "--disable-extensions",
+      "--mute-audio"
+    ];
+
+    try {
+      console.log("[SERVER] Launching CloakBrowser stealth Chromium...");
+      browser = await launch({
+        headless: true,
+        args: launchArgs
+      });
+      browserEngine = 'cloakbrowser';
+      console.log("[SERVER] Browser engine active: CloakBrowser");
+    } catch (cloakErr: any) {
+      console.warn(`[SERVER] CloakBrowser launch failed: ${cloakErr?.message || 'unknown error'}`);
+      console.warn("[SERVER] Falling back to stock Playwright Chromium...");
+      browser = await playwrightChromium.launch({
+        headless: true,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-blink-features=AutomationControlled",
+          ...launchArgs
+        ]
+      });
+      browserEngine = 'playwright';
+      console.log("[SERVER] Browser engine active: Playwright fallback");
+    }
   }
   return browser;
 }
@@ -107,65 +122,14 @@ const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000);
+  const ADMIN_KEY = process.env.ADMIN_KEY || '9040';
 
   app.use(cors());
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
   const upload = multer({ storage: multer.memoryStorage() });
-
-  // Add Auth Middleware globally for /api routes
-  app.use('/api', async (req, res, next) => {
-    // Optionally skip auth for a public health check if any
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: "Missing or invalid authorization token" });
-    }
-    const token = authHeader.split('Bearer ')[1];
-    try {
-      const decoded = await admin.auth().verifyIdToken(token);
-      (req as any).user = decoded;
-      
-      // Allowlist Check
-      const allowedUser = await dbService.getAllowlistUser(decoded.email || '');
-      if (!allowedUser) {
-        return res.status(403).json({ error: "Email not in the application allowlist." });
-      }
-      (req as any).role = allowedUser.role;
-      next();
-    } catch (e) {
-      console.error("[Auth] Invalid Token:", e);
-      return res.status(403).json({ error: "Invalid or expired token." });
-    }
-  });
-
-  // Allowlist Endpoints
-  app.get("/api/me", (req, res) => {
-    res.json({ email: (req as any).user.email, role: (req as any).role });
-  });
-
-  app.get("/api/allowlist", async (req, res) => {
-    if ((req as any).role !== 'admin') return res.status(403).json({ error: "Admin only" });
-    const list = await dbService.getAllowlist();
-    res.json(list);
-  });
-  
-  app.post("/api/allowlist", async (req, res) => {
-    if ((req as any).role !== 'admin') return res.status(403).json({ error: "Admin only" });
-    const { email, role } = req.body;
-    if (!email || !role) return res.status(400).json({ error: "Email and role required" });
-    await dbService.addAllowlistUser(email, role);
-    res.json({ success: true });
-  });
-
-  app.delete("/api/allowlist/:email", async (req, res) => {
-    if ((req as any).role !== 'admin') return res.status(403).json({ error: "Admin only" });
-    const { email } = req.params;
-    if (email === (req as any).user.email) return res.status(400).json({ error: "Cannot remove yourself" });
-    await dbService.removeAllowlistUser(email);
-    res.json({ success: true });
-  });
 
   app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
     try {
@@ -308,7 +272,7 @@ async function startServer() {
       url = 'https://' + url;
     }
     
-    let context: BrowserContext | null = null;
+    let context: any = null;
     try {
       console.log(`[SERVER] Multi-Stage Extraction Starting: ${url} (Strategy: ${strategy || 'default'}, Screenshot: ${enableScreenshot}, Scroll: ${deepScroll})`);
       
@@ -782,7 +746,7 @@ async function startServer() {
     url = sanitizeUrl(url);
     try { new URL(url); } catch(e) { return res.status(400).json({ error: "Invalid URL format" }); }
 
-    let context: BrowserContext | null = null;
+    let context: any = null;
     try {
       console.log(`[SERVER] Discovery Mode Starting: ${url}`);
       const browserInstance = await getBrowser();
@@ -841,7 +805,7 @@ async function startServer() {
   });
 
   async function performInspection(url: string, deepScroll: boolean) {
-    let context: BrowserContext | null = null;
+    let context: any = null;
     try {
       console.log(`[SERVER] Inspection Started: ${url}`);
       const browserInstance = await getBrowser();
@@ -1305,12 +1269,56 @@ async function startServer() {
     try {
       return await dbService.getSettings();
     } catch (e) {
-      return { title: "", bullets: "", description: "", keywords: "", groqApiKey: "", attributeSets: [] };
+      return {
+        title: "",
+        bullets: "",
+        description: "",
+        keywords: "",
+        groqApiKey: "",
+        attributeSets: [],
+        selectorPresets: [],
+        plpSelectorPresets: []
+      };
     }
   }
 
+  app.get('/api/admin/status', (req, res) => {
+    res.json({ adminConfigured: !!ADMIN_KEY });
+  });
+
+  app.get('/api/health/firestore', (_req, res) => {
+    try {
+      const status = dbService.getFirestoreStatus();
+      res.json({ success: true, firestore: status });
+    } catch (e: any) {
+      res.status(500).json({
+        success: false,
+        error: 'Failed to read Firestore health status',
+        details: e?.message || 'unknown error'
+      });
+    }
+  });
+
+  app.post('/api/admin/login', (req, res) => {
+    const { key } = req.body || {};
+    if (!ADMIN_KEY) {
+      return res.status(500).json({ error: 'ADMIN_KEY is not configured on the server.' });
+    }
+    if (key === ADMIN_KEY) {
+      return res.json({ success: true });
+    }
+    return res.status(401).json({ error: 'Invalid admin key' });
+  });
+
   app.post("/api/settings", async (req, res) => {
     try {
+      if (!ADMIN_KEY) {
+        return res.status(500).json({ error: 'ADMIN_KEY is not configured on the server.' });
+      }
+      const adminKey = req.headers['x-admin-key'];
+      if (typeof adminKey !== 'string' || adminKey !== ADMIN_KEY) {
+        return res.status(403).json({ error: 'Admin access required to update settings.' });
+      }
       const settings = req.body;
       await dbService.saveSettings(settings);
       if (settings.groqApiKey) currentGroq = new Groq({ apiKey: settings.groqApiKey });

@@ -1,0 +1,17 @@
+node_modules
+dist
+.git
+.gitignore
+.vscode
+.env
+.env.*
+*.log
+npm-debug.log*
+Dockerfile*
+docker-compose*.yml
+coverage
+CloakBrowser-main
+outputs
+jobs
+harvest
+firebase-service-account.json

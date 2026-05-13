@@ -3,29 +3,97 @@ import { getFirestore } from 'firebase-admin/firestore';
 import fs from 'fs';
 import path from 'path';
 
+type FirestoreScope = 'sku' | 'harvest' | 'settings' | 'allowlist' | 'outputs';
+
+// Default to full Firestore sync so admin updates are shared across users.
+// Allowed values: all | outputs-only | off
+const FIRESTORE_MODE = (process.env.FIRESTORE_MODE || 'all').toLowerCase();
+const canUseFirestore = (scope: FirestoreScope) => {
+  if (FIRESTORE_MODE === 'all') return true;
+  if (FIRESTORE_MODE === 'off') return false;
+  return scope === 'outputs';
+};
+
+console.log(`[Firestore] Mode: ${FIRESTORE_MODE}`);
+
+let firestoreProjectId: string | null = null;
+let firestoreDatabaseId: string | null = null;
+let firestoreInitError: string | null = null;
+let firestoreAuthSource: 'service-account-env' | 'service-account-file' | 'application-default' | 'none' = 'none';
+
+const loadServiceAccount = () => {
+  const fromEnv = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+  if (fromEnv) {
+    try {
+      const parsed = JSON.parse(fromEnv);
+      firestoreAuthSource = 'service-account-env';
+      return parsed;
+    } catch (e: any) {
+      firestoreInitError = `Invalid FIREBASE_SERVICE_ACCOUNT_JSON: ${e?.message || 'parse error'}`;
+      return null;
+    }
+  }
+
+  const serviceAccountPath = path.join(process.cwd(), 'firebase-service-account.json');
+  if (fs.existsSync(serviceAccountPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
+      firestoreAuthSource = 'service-account-file';
+      return parsed;
+    } catch (e: any) {
+      firestoreInitError = `Invalid firebase-service-account.json: ${e?.message || 'parse error'}`;
+      return null;
+    }
+  }
+
+  firestoreAuthSource = 'application-default';
+  return null;
+};
+
 // Safely initialize Firebase Admin
 let db: admin.firestore.Firestore | null = null;
 try {
   const firebaseConfigPath = path.join(process.cwd(), 'firebase-applet-config.json');
   if (fs.existsSync(firebaseConfigPath)) {
     const config = JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf8'));
+    firestoreProjectId = typeof config.projectId === 'string' ? config.projectId : null;
+    firestoreDatabaseId = typeof config.firestoreDatabaseId === 'string' ? config.firestoreDatabaseId : '(default)';
+    const serviceAccount = loadServiceAccount();
+
+    if (!serviceAccount && !process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      console.warn('[Firestore] No explicit credentials detected. Set FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS for stable local connectivity.');
+    }
+
     // Make sure we only initialize once
     if (!admin.apps.length) {
-      admin.initializeApp({ projectId: config.projectId });
+      if (serviceAccount) {
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+          projectId: config.projectId
+        });
+      } else {
+        admin.initializeApp({ projectId: config.projectId });
+      }
     }
     // Set up with the specified databaseId
     const databaseId = config.firestoreDatabaseId !== '(default)' && config.firestoreDatabaseId ? config.firestoreDatabaseId : undefined;
     db = getFirestore(admin.app(), databaseId);
     // Test connection silently
-    if (db) {
+    if (db && canUseFirestore('settings')) {
       db.collection('settings').doc('connection_test').set({ 
         last_init: new Date().toISOString(),
         platform: 'server_admin_sdk'
       }).catch(() => {});
     }
+  } else {
+    console.warn('[Firestore] firebase-applet-config.json not found. Using local filesystem fallback.');
+    firestoreInitError = 'firebase-applet-config.json not found';
+    firestoreAuthSource = 'none';
   }
 } catch (e: any) {
-  // Fallback to local FS only
+  console.warn(`[Firestore] Initialization failed: ${e?.message || 'unknown error'}. Using local filesystem fallback.`);
+  firestoreInitError = e?.message || 'unknown error';
+  firestoreAuthSource = 'none';
   db = null;
 }
 
@@ -43,10 +111,40 @@ const SETTINGS_DIR = path.join(process.cwd(), 'settings');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
+const readJsonFile = <T>(filePath: string, fallback: T): T => {
+  if (!fs.existsSync(filePath)) return fallback;
+
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8').trim();
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+};
+
 export const dbService = {
+  getFirestoreStatus() {
+    return {
+      mode: FIRESTORE_MODE,
+      connected: !!db,
+      projectId: firestoreProjectId,
+      databaseId: firestoreDatabaseId,
+      authSource: firestoreAuthSource,
+      initError: firestoreInitError,
+      scopeAccess: {
+        sku: canUseFirestore('sku'),
+        harvest: canUseFirestore('harvest'),
+        settings: canUseFirestore('settings'),
+        allowlist: canUseFirestore('allowlist'),
+        outputs: canUseFirestore('outputs')
+      }
+    };
+  },
+
   // SKU Index
   async getSkuIndex() {
-    if (db) {
+    if (db && canUseFirestore('sku')) {
       try {
         const docSnap = await db.collection('settings').doc('master_index').get();
         if (docSnap.exists) return docSnap.data()?.data || [];
@@ -55,11 +153,10 @@ export const dbService = {
       }
     }
     const fp = path.join(SKU_INDEX_DIR, 'master.json');
-    if (fs.existsSync(fp)) return JSON.parse(fs.readFileSync(fp, 'utf8'));
-    return [];
+    return readJsonFile(fp, [] as any[]);
   },
   async updateSkuIndex(data: any[]) {
-    if (db) {
+    if (db && canUseFirestore('sku')) {
       try {
         await db.collection('settings').doc('master_index').set({ data });
       } catch (e: any) {
@@ -71,7 +168,7 @@ export const dbService = {
 
   // Harvests
   async getHarvest(sku: string) {
-    if (db) {
+    if (db && canUseFirestore('harvest')) {
       try {
         const docSnap = await db.collection('harvests').doc(sku).get();
         if (docSnap.exists) return docSnap.data()?.content || null;
@@ -84,7 +181,7 @@ export const dbService = {
     return null;
   },
   async saveHarvest(sku: string, content: string, secondaryContent?: string) {
-    if (db) {
+    if (db && canUseFirestore('harvest')) {
       try {
         const docData: any = { sku, content };
         if (secondaryContent !== undefined) {
@@ -102,7 +199,7 @@ export const dbService = {
     }
   },
   async deleteHarvest(sku: string) {
-    if (db) {
+    if (db && canUseFirestore('harvest')) {
       try {
         await db.collection('harvests').doc(sku).delete();
       } catch (e: any) {
@@ -115,7 +212,7 @@ export const dbService = {
     if (fs.existsSync(fpSecondary)) fs.unlinkSync(fpSecondary);
   },
   async listHarvests() {
-    if (db) {
+    if (db && canUseFirestore('harvest')) {
       try {
         const querySnapshot = await db.collection('harvests').get();
         return querySnapshot.docs.map(d => ({
@@ -140,7 +237,9 @@ export const dbService = {
 
   // Outputs
   async getOutput(sku: string) {
-    if (db) {
+    const fp = path.join(OUTPUTS_DIR, `${sku}.json`);
+    if (fs.existsSync(fp)) return JSON.parse(fs.readFileSync(fp, 'utf8'));
+    if (db && canUseFirestore('outputs')) {
       try {
         const docSnap = await db.collection('outputs').doc(sku).get();
         if (docSnap.exists) return docSnap.data()?.data || null;
@@ -148,12 +247,10 @@ export const dbService = {
         // ignore
       }
     }
-    const fp = path.join(OUTPUTS_DIR, `${sku}.json`);
-    if (fs.existsSync(fp)) return JSON.parse(fs.readFileSync(fp, 'utf8'));
     return null;
   },
   async saveOutput(sku: string, data: any) {
-    if (db) {
+    if (db && canUseFirestore('outputs')) {
       try {
         await db.collection('outputs').doc(sku).set({ sku, data });
       } catch (e: any) {
@@ -163,7 +260,7 @@ export const dbService = {
     fs.writeFileSync(path.join(OUTPUTS_DIR, `${sku}.json`), JSON.stringify(data, null, 2));
   },
   async deleteOutput(sku: string) {
-    if (db) {
+    if (db && canUseFirestore('outputs')) {
       try {
         await db.collection('outputs').doc(sku).delete();
       } catch (e: any) {
@@ -174,7 +271,11 @@ export const dbService = {
     if (fs.existsSync(fp)) fs.unlinkSync(fp);
   },
   async listOutputs() {
-    if (db) {
+    const files = fs.readdirSync(OUTPUTS_DIR).filter(f => f.endsWith('.json'));
+    if (files.length > 0) {
+      return files.map(f => JSON.parse(fs.readFileSync(path.join(OUTPUTS_DIR, f), 'utf8')));
+    }
+    if (db && canUseFirestore('outputs')) {
       try {
         const querySnapshot = await db.collection('outputs').get();
         return querySnapshot.docs.map(d => {
@@ -185,13 +286,12 @@ export const dbService = {
         // ignore
       }
     }
-    const files = fs.readdirSync(OUTPUTS_DIR).filter(f => f.endsWith('.json'));
-    return files.map(f => JSON.parse(fs.readFileSync(path.join(OUTPUTS_DIR, f), 'utf8')));
+    return [];
   },
 
   // Settings
   async getSettings() {
-    if (db) {
+    if (db && canUseFirestore('settings')) {
       try {
         const docSnap = await db.collection('settings').doc('app_settings').get();
         if (docSnap.exists) return docSnap.data()?.data || {};
@@ -200,11 +300,10 @@ export const dbService = {
       }
     }
     const fp = path.join(SETTINGS_DIR, 'app_settings.json');
-    if (fs.existsSync(fp)) return JSON.parse(fs.readFileSync(fp, 'utf8'));
-    return {};
+    return readJsonFile(fp, {});
   },
   async saveSettings(settings: any) {
-    if (db) {
+    if (db && canUseFirestore('settings')) {
       try {
         await db.collection('settings').doc('app_settings').set({ data: settings });
       } catch (e: any) {
@@ -216,7 +315,7 @@ export const dbService = {
 
   // Allowlist
   async getAllowlist() {
-    if (db) {
+    if (db && canUseFirestore('allowlist')) {
       try {
         const querySnapshot = await db.collection('allowlist').get();
         return querySnapshot.docs.map(d => ({ email: d.id, ...d.data() }));
@@ -225,11 +324,10 @@ export const dbService = {
       }
     }
     const fp = path.join(SETTINGS_DIR, 'allowlist.json');
-    if (fs.existsSync(fp)) return JSON.parse(fs.readFileSync(fp, 'utf8'));
-    return [{ email: 'aswathmantle@gmail.com', role: 'admin' }];
+    return readJsonFile(fp, [{ email: 'aswathmantle@gmail.com', role: 'admin' }]);
   },
   async getAllowlistUser(email: string) {
-    if (db) {
+    if (db && canUseFirestore('allowlist')) {
       try {
         const docSnap = await db.collection('allowlist').doc(email).get();
         if (docSnap.exists) return { email, ...docSnap.data() };
@@ -242,7 +340,7 @@ export const dbService = {
   },
   async addAllowlistUser(email: string, role: string) {
     const entry = { email, role, addedAt: new Date().toISOString() };
-    if (db) {
+    if (db && canUseFirestore('allowlist')) {
       try {
         await db.collection('allowlist').doc(email).set(entry);
       } catch (e: any) {
@@ -250,14 +348,14 @@ export const dbService = {
       }
     }
     const fp = path.join(SETTINGS_DIR, 'allowlist.json');
-    const list = fs.existsSync(fp) ? JSON.parse(fs.readFileSync(fp, 'utf8')) : [];
+    const list = readJsonFile(fp, [] as any[]);
     if (!list.find((u: any) => u.email === email)) {
       list.push(entry);
       fs.writeFileSync(fp, JSON.stringify(list, null, 2));
     }
   },
   async removeAllowlistUser(email: string) {
-    if (db) {
+    if (db && canUseFirestore('allowlist')) {
       try {
         await db.collection('allowlist').doc(email).delete();
       } catch (e: any) {
@@ -266,7 +364,7 @@ export const dbService = {
     }
     const fp = path.join(SETTINGS_DIR, 'allowlist.json');
     if (fs.existsSync(fp)) {
-      let list = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      let list = readJsonFile(fp, [] as any[]);
       list = list.filter((u: any) => u.email !== email);
       fs.writeFileSync(fp, JSON.stringify(list, null, 2));
     }
