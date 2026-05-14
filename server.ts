@@ -236,21 +236,32 @@ async function startServer() {
     return next();
   });
 
-  app.use(cors({
-    origin: (origin, callback) => {
-      if (!origin) return callback(null, true);
-      if (ALLOW_ALL_CORS) return callback(null, true);
-      if (process.env.NODE_ENV !== 'production' && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) {
-        return callback(null, true);
-      }
-      if (CORS_ORIGINS.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error('Origin not allowed by CORS'));
-    },
-    methods: ['GET', 'POST', 'DELETE'],
-    credentials: true
-  }));
+  const shouldEnableCors =
+    ALLOW_ALL_CORS ||
+    CORS_ORIGINS.length > 0 ||
+    process.env.NODE_ENV !== 'production';
+
+  // In production with no configured CORS origins, skip CORS middleware entirely.
+  // Same-origin requests still work, and browsers block cross-origin access by default.
+  if (shouldEnableCors) {
+    app.use(cors({
+      origin: (origin, callback) => {
+        if (!origin) return callback(null, true);
+        if (ALLOW_ALL_CORS) return callback(null, true);
+        if (process.env.NODE_ENV !== 'production' && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) {
+          return callback(null, true);
+        }
+        if (CORS_ORIGINS.includes(origin)) {
+          return callback(null, true);
+        }
+        return callback(new Error('Origin not allowed by CORS'));
+      },
+      methods: ['GET', 'POST', 'DELETE'],
+      credentials: true
+    }));
+  } else {
+    console.log('[SERVER] CORS middleware disabled (production + empty CORS_ORIGINS). Same-origin only.');
+  }
 
   // Parse cookies for authentication (httpOnly cookies cannot be accessed from JS)
   app.use(cookieParser());
@@ -1670,7 +1681,7 @@ async function startServer() {
 
   // Public liveness/readiness probe — no auth required, safe for platform health checks
   app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok', ts: Date.now() });
+    res.json({ ok: true, status: 'ok', ts: Date.now() });
   });
 
   app.get('/api/admin/status', (_req, res) => {
