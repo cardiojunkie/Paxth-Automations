@@ -1,7 +1,20 @@
 // Browser lifecycle management — CloakBrowser (primary) + Playwright (fallback)
 // Keeps browser singleton state and concurrent task limiting.
 
-import { launch } from 'cloakbrowser';
+// Lazy-load cloakbrowser to avoid startup crash on Node 24+ if package exports are missing
+let cloakBrowserLaunch: typeof import('cloakbrowser').launch | null = null;
+const getCloakBrowserLaunch = async () => {
+  if (cloakBrowserLaunch === null) {
+    try {
+      const cloakbrowser = await import('cloakbrowser');
+      cloakBrowserLaunch = cloakbrowser.launch;
+    } catch (e) {
+      cloakBrowserLaunch = false as any; // Mark as unavailable
+    }
+  }
+  return cloakBrowserLaunch || null;
+};
+
 import { chromium as playwrightChromium } from 'playwright';
 import { BusyError } from './errors.js';
 
@@ -39,9 +52,14 @@ export async function getBrowser(): Promise<BrowserLike> {
   if (!browser) {
     try {
       console.log('[BROWSER] Launching CloakBrowser stealth Chromium...');
-      browser = await launch({ headless: true, args: LAUNCH_ARGS });
-      browserEngine = 'cloakbrowser';
-      console.log('[BROWSER] Browser engine active: CloakBrowser');
+      const cloakLaunch = await getCloakBrowserLaunch();
+      if (cloakLaunch) {
+        browser = await cloakLaunch({ headless: true, args: LAUNCH_ARGS });
+        browserEngine = 'cloakbrowser';
+        console.log('[BROWSER] Browser engine active: CloakBrowser');
+      } else {
+        throw new Error('CloakBrowser unavailable, falling back to Playwright');
+      }
     } catch (cloakErr: unknown) {
       const msg = cloakErr instanceof Error ? cloakErr.message : 'unknown error';
       console.warn(`[BROWSER] CloakBrowser launch failed: ${msg}`);

@@ -3,9 +3,12 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
-    "dev": "playwright install-deps chromium && playwright install chromium && tsx server.ts",
-    "postinstall": "playwright install-deps chromium && playwright install chromium",
+    "dev": "tsx server.ts",
+    "postinstall": "if [ \"${INSTALL_PLAYWRIGHT:-true}\" = \"true\" ]; then playwright install-deps chromium && playwright install chromium; else echo 'Skipping Playwright browser install (INSTALL_PLAYWRIGHT=false)'; fi",
     "build": "vite build",
     "start": "NODE_ENV=production tsx server.ts",
     "start:prod": "NODE_ENV=production tsx server.ts",
@@ -38,6 +41,7 @@
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
     "sharp": "^0.34.5",
+    "tsx": "^4.21.0",
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2",
     "vite": "^6.2.0",
@@ -54,7 +58,6 @@
     "autoprefixer": "^10.4.21",
     "cross-env": "^10.1.0",
     "tailwindcss": "^4.1.14",
-    "tsx": "^4.21.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
