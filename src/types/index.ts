@@ -25,6 +25,24 @@ export interface FirestoreHealth {
   initError?: string | null;
 }
 
+export type UserRole = 'admin' | 'user';
+
+export interface AuthUser {
+  email: string;
+  role: UserRole;
+}
+
+export interface AuthMeResponse {
+  authenticated: boolean;
+  user: AuthUser;
+}
+
+export interface AllowlistUser {
+  email: string;
+  role: UserRole;
+  addedAt?: string | null;
+}
+
 export interface SelectorPreset {
   name: string;
   selector: string;

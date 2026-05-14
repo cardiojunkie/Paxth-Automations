@@ -27,7 +27,7 @@ MoosStudio is a full-stack product content automation platform built for e-comme
 | **Batch Jobs** | Queue and run multi-SKU enrichment jobs with live progress logs |
 | **XLSX / JSON Export** | One-click exports formatted for catalogue import |
 | **Firestore Sync** | All data optionally mirrors to Firebase Firestore in real time |
-| **Admin Auth** | Email allowlist + session key gate on all `/api/*` routes |
+| **Auth & Roles** | Email allowlist + role-based session auth (`admin` / `user`) on all `/api/*` routes |
 
 ---
 
@@ -49,7 +49,7 @@ MoosStudio is a full-stack product content automation platform built for e-comme
 ├── server.ts              # Express API server + Vite dev middleware
 ├── src/
 │   ├── App.tsx            # Main React dashboard
-│   ├── auth.ts            # API fetch wrapper (injects admin key)
+│   ├── auth.ts            # API fetch wrapper (cookie-based session)
 │   └── services/db.ts     # Firestore + filesystem abstraction layer
 ├── settings/
 │   ├── app_settings.json  # Attribute sets, LLM rules, saved presets
@@ -94,7 +94,12 @@ MoosStudio is a full-stack product content automation platform built for e-comme
 | `DELETE` | `/api/images/:sku` | Delete images for a SKU |
 | `GET` | `/api/settings` | Get app settings |
 | `POST` | `/api/settings` | Save app settings |
-| `POST` | `/api/admin/login` | Admin session login |
+| `POST` | `/api/auth/login` | Email allowlist login |
+| `POST` | `/api/auth/logout` | End current session |
+| `GET` | `/api/auth/me` | Current authenticated user + role |
+| `GET` | `/api/admin/users` | List allowlist users (admin only) |
+| `POST` | `/api/admin/users` | Add/update allowlist user role (admin only) |
+| `DELETE` | `/api/admin/users/:email` | Remove allowlist user (admin only) |
 | `GET` | `/api/admin/status` | Server status |
 | `GET` | `/api/health/firestore` | Firestore connection health |
 
@@ -137,7 +142,7 @@ fuser -k 3000/tcp 24678/tcp 2>/dev/null; npm run dev
 | `PORT` | No | Server port (default `3000`) |
 | `CORS_ORIGINS` | Recommended for cross-origin UI | Comma-separated allowed browser origins (set `*` only in trusted internal networks) |
 | `MAX_CONCURRENT_BROWSER_TASKS` | No | Max parallel browser sessions (default `2`) |
-| `ADMIN_KEY` | Yes | Static key for admin API auth (server fails to start without it) |
+
 
 > **Security:** Never commit `firebase-service-account.json` or `GROQ_API_KEY` to version control. Use environment variables in all deployed environments.
 
@@ -149,7 +154,7 @@ Use the included multi-stage `Dockerfile` on any Docker-compatible host (VPS, Ra
 
 ### Required runtime environment
 
-1. Set `ADMIN_KEY` (required to boot).
+1. Ensure `settings/allowlist.json` has at least one `admin` user email.
 2. Set `GROQ_API_KEY` if AI enrichment is needed.
 3. Set `FIREBASE_SERVICE_ACCOUNT_JSON` for Firestore access.
 4. Set `CORS_ORIGINS` when frontend is served from a different origin.
@@ -161,7 +166,7 @@ Use the included multi-stage `Dockerfile` on any Docker-compatible host (VPS, Ra
 | Runtime | Docker |
 | Dockerfile path | `./Dockerfile` |
 | Port | `3000` |
-| Health check path | `/api/admin/status` |
+| Health check path | `/api/health` |
 
 ### Persistent storage (optional)
 
@@ -183,7 +188,6 @@ docker build -t moosstudioza .
 
 # Run
 docker run -p 3000:3000 \
-  -e ADMIN_KEY=change-this \
   -e GROQ_API_KEY=your_key \
   -e CORS_ORIGINS=https://your-frontend-domain.com \
   -e FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}' \

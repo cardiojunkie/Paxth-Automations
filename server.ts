@@ -34,6 +34,8 @@ import {
   ImageExtractRequestSchema,
   SKUIndexRequestSchema,
   SettingsRequestSchema,
+  LoginRequestSchema,
+  AllowlistUpsertRequestSchema,
 } from "./src/server/schemas.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -128,16 +130,7 @@ const groq = buildGroqClient(process.env.GROQ_API_KEY);
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
-  const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
-  
-  // Validate ADMIN_KEY is set (CRITICAL: Required for API security)
-  if (!ADMIN_KEY) {
-    console.error('[SERVER] FATAL: ADMIN_KEY environment variable is not set. This is required for API security.');
-    console.error('[SERVER] Please set ADMIN_KEY before starting the server.');
-    process.exit(1);
-  }
-  
-  console.log('[SERVER] ✓ ADMIN_KEY loaded successfully. Length:', ADMIN_KEY.length);
+  const AUTH_COOKIE = 'auth_user';
   
   const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
     .split(',')
@@ -223,13 +216,34 @@ async function startServer() {
   // Parse cookies for authentication (httpOnly cookies cannot be accessed from JS)
   app.use(cookieParser());
 
-  // Authentication middleware for protected API endpoints (CRITICAL SECURITY)
-  const requireAdminAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    // Check for admin token in httpOnly cookie (httpOnly cookies cannot be accessed from JS)
-    const adminToken = req.cookies?.admin_token || req.headers['x-admin-key'];
-    if (typeof adminToken !== 'string' || adminToken !== ADMIN_KEY) {
-      console.warn(`[SERVER] Unauthorized API access attempt on ${req.method} ${req.path} from ${req.ip}`);
-      return res.status(403).json({ error: 'Unauthorized. Admin key required.' });
+  const normalizeEmail = (email: string) => email.trim().toLowerCase();
+
+  const resolveSessionUser = async (req: express.Request) => {
+    const emailRaw = req.cookies?.[AUTH_COOKIE];
+    if (typeof emailRaw !== 'string' || !emailRaw.trim()) {
+      return null;
+    }
+    return dbService.getAllowlistUser(normalizeEmail(emailRaw));
+  };
+
+  const requireAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    try {
+      const user = await resolveSessionUser(req);
+      if (!user) {
+        console.warn(`[SERVER] Unauthorized API access attempt on ${req.method} ${req.path} from ${req.ip}`);
+        return res.status(403).json({ error: 'Unauthorized. Login required.' });
+      }
+      (req as any).authUser = user;
+      next();
+    } catch (error) {
+      return res.status(500).json({ error: 'Failed to validate authentication.' });
+    }
+  };
+
+  const requireAdminRole = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const user = (req as any).authUser;
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin role required.' });
     }
     next();
   };
@@ -427,7 +441,7 @@ async function startServer() {
   });
   // ── End queue handler registrations ───────────────────────────────────────
 
-  app.post("/api/upload-pdf", upload.single("file"), requireAdminAuth, async (req, res) => {
+  app.post("/api/upload-pdf", upload.single("file"), requireAuth, async (req, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({ error: "No file uploaded" });
@@ -471,7 +485,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/sku/index", requireAdminAuth, validateRequest(SKUIndexRequestSchema), async (req, res) => {
+  app.post("/api/sku/index", requireAuth, validateRequest(SKUIndexRequestSchema), async (req, res) => {
     const { data } = req.body;
     if (!data || !Array.isArray(data)) {
       return res.status(400).json({ error: "Invalid data format" });
@@ -498,7 +512,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/sku/index/:sku", requireAdminAuth, async (req, res) => {
+  app.delete("/api/sku/index/:sku", requireAuth, async (req, res) => {
     try {
       const { sku } = req.params;
       const data = await dbService.getSkuIndex();
@@ -510,7 +524,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/sku/index", requireAdminAuth, async (req, res) => {
+  app.get("/api/sku/index", requireAuth, async (req, res) => {
     try {
       const data = await dbService.getSkuIndex();
       res.json(data);
@@ -519,7 +533,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/harvest", requireAdminAuth, async (req, res) => {
+  app.get("/api/harvest", requireAuth, async (req, res) => {
     try {
       const fileData = await dbService.listHarvests();
       res.json(fileData);
@@ -528,7 +542,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/harvest/:filename", requireAdminAuth, async (req, res) => {
+  app.get("/api/harvest/:filename", requireAuth, async (req, res) => {
     try {
       const { filename } = req.params;
       const sku = filename.replace('.md', '');
@@ -543,7 +557,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/harvest/:filename", requireAdminAuth, async (req, res) => {
+  app.delete("/api/harvest/:filename", requireAuth, async (req, res) => {
     try {
       const { filename } = req.params;
       const sku = filename.replace('.md', '');
@@ -554,7 +568,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/save-batch", requireAdminAuth, async (req, res) => {
+  app.post("/api/save-batch", requireAuth, async (req, res) => {
     const { sku, content } = req.body;
     if (!sku || !content) {
       return res.status(400).json({ error: "SKU and content are required" });
@@ -988,7 +1002,7 @@ async function startServer() {
   }
 
   // API Route for scraping and optional Groq extraction
-  app.post("/api/scrape", requireAdminAuth, validateRequest(ScrapeRequestSchema), async (req, res) => {
+  app.post("/api/scrape", requireAuth, validateRequest(ScrapeRequestSchema), async (req, res) => {
     let { url, selector, extractWithGroq, enableScreenshot, sku, strategy, deepScroll, secondaryTarget } = req.body;
 
     if (!url) {
@@ -1061,7 +1075,7 @@ async function startServer() {
   });
 
   // API Route for Discovery Mode (Deep Crawl)
-  app.post("/api/discover", requireAdminAuth, validateRequest(DiscoverRequestSchema), async (req, res) => {
+  app.post("/api/discover", requireAuth, validateRequest(DiscoverRequestSchema), async (req, res) => {
     let { url, linkSelector } = req.body;
     if (!url) return res.status(400).json({ error: "URL is required" });
     
@@ -1214,7 +1228,7 @@ async function startServer() {
 }
 
 
-  app.post("/api/inspect", requireAdminAuth, async (req, res) => {
+  app.post("/api/inspect", requireAuth, async (req, res) => {
     try {
         let url = req.body.url;
         if (!url) return res.status(400).json({ error: "URL is required" });
@@ -1233,7 +1247,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/analyze", requireAdminAuth, validateRequest(AnalyzeRequestSchema), async (req, res) => {
+  app.post("/api/analyze", requireAuth, validateRequest(AnalyzeRequestSchema), async (req, res) => {
     const { url, deepScroll } = req.body;
     try {
         if (!url) return res.status(400).json({ error: "URL is required" });
@@ -1292,7 +1306,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/pdf/:sku", requireAdminAuth, async (req, res) => {
+  app.get("/api/pdf/:sku", requireAuth, async (req, res) => {
     try {
       const idx = await dbService.getSkuIndex();
       const record = idx.find((r: any) => (r.sku || r.SKU)?.toString() === req.params.sku.toString());
@@ -1305,7 +1319,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/jobs", requireAdminAuth, async (req, res) => {
+  app.get("/api/jobs", requireAuth, async (req, res) => {
     try {
       const cursor = req.query.cursor as string | undefined;
       const limit = Math.min(Number(req.query.limit) || 50, 200);
@@ -1348,7 +1362,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/jobs/run", requireAdminAuth, async (req, res) => {
+  app.post("/api/jobs/run", requireAuth, async (req, res) => {
     const { sku, attributeSetName, aiModel } = req.body;
     if (!sku) return res.status(400).json({ error: "SKU required" });
     try {
@@ -1366,18 +1380,18 @@ async function startServer() {
   });
 
   // ── Queue monitoring endpoints ─────────────────────────────────────────────
-  app.get('/api/queue/stats', requireAdminAuth, (_req, res) => {
+  app.get('/api/queue/stats', requireAuth, (_req, res) => {
     res.json(jobQueue.getStats());
   });
 
-  app.get('/api/queue/:jobId', requireAdminAuth, (req, res) => {
+  app.get('/api/queue/:jobId', requireAuth, (req, res) => {
     const job = jobQueue.getJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     res.json(job);
   });
   // ─────────────────────────────────────────────────────────────────────────
 
-  app.post("/api/outputs/:sku", requireAdminAuth, async (req, res) => {
+  app.post("/api/outputs/:sku", requireAuth, async (req, res) => {
     try {
       const { sku } = req.params;
       const data = req.body;
@@ -1389,7 +1403,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/outputs/:sku", requireAdminAuth, async (req, res) => {
+  app.delete("/api/outputs/:sku", requireAuth, async (req, res) => {
     try {
       const { sku } = req.params;
       const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
@@ -1400,7 +1414,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/outputs/json/:filename", requireAdminAuth, async (req, res) => {
+  app.get("/api/outputs/json/:filename", requireAuth, async (req, res) => {
     try {
       const { filename } = req.params;
       const sku = filename.replace('.json', '');
@@ -1415,7 +1429,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/outputs/xlsx", requireAdminAuth, async (req, res) => {
+  app.get("/api/outputs/xlsx", requireAuth, async (req, res) => {
     try {
       const skusQuery = req.query.skus ? (req.query.skus as string).split(',') : null;
       let rows = await dbService.listOutputs();
@@ -1529,8 +1543,8 @@ async function startServer() {
     res.json({ status: 'ok', ts: Date.now() });
   });
 
-  app.get('/api/admin/status', (req, res) => {
-    res.json({ adminConfigured: !!ADMIN_KEY });
+  app.get('/api/admin/status', (_req, res) => {
+    res.json({ adminConfigured: true });
   });
 
   app.get('/api/health/firestore', (_req, res) => {
@@ -1546,25 +1560,81 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/login', (req, res) => {
-    const { key } = req.body || {};
-    if (!ADMIN_KEY) {
-      return res.status(403).json({ error: 'ADMIN_KEY is not configured on the server.' });
+  app.post('/api/auth/login', validateRequest(LoginRequestSchema), async (req, res) => {
+    const { email } = req.body;
+    const normalized = normalizeEmail(email);
+    const user: any = await dbService.getAllowlistUser(normalized);
+    if (!user) {
+      return res.status(401).json({ error: 'User is not in allowlist.' });
     }
-    if (key === ADMIN_KEY) {
-      // Set httpOnly, secure cookie (CRITICAL SECURITY FIX)
-      res.cookie('admin_token', key, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
-        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-      });
-      return res.json({ success: true });
-    }
-    return res.status(401).json({ error: 'Invalid admin key' });
+
+    res.cookie(AUTH_COOKIE, normalized, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    return res.json({
+      success: true,
+      user: { email: user.email, role: user.role === 'admin' ? 'admin' : 'user' }
+    });
   });
 
-  app.post("/api/settings", requireAdminAuth, validateRequest(SettingsRequestSchema), async (req, res) => {
+  app.post('/api/auth/logout', (_req, res) => {
+    res.clearCookie(AUTH_COOKIE, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+    });
+    return res.json({ success: true });
+  });
+
+  app.get('/api/auth/me', requireAuth, (req, res) => {
+    const user: any = (req as any).authUser;
+    return res.json({
+      authenticated: true,
+      user: {
+        email: user.email,
+        role: user.role === 'admin' ? 'admin' : 'user'
+      }
+    });
+  });
+
+  app.get('/api/admin/users', requireAuth, requireAdminRole, async (_req, res) => {
+    const users = await dbService.getAllowlist();
+    users.sort((a: any, b: any) => a.email.localeCompare(b.email));
+    res.json(users.map((u: any) => ({ email: u.email, role: u.role, addedAt: u.addedAt || null })));
+  });
+
+  app.post('/api/admin/users', requireAuth, requireAdminRole, validateRequest(AllowlistUpsertRequestSchema), async (req, res) => {
+    const { email, role } = req.body;
+    const normalized = normalizeEmail(email);
+    await dbService.addAllowlistUser(normalized, role);
+    return res.json({ success: true });
+  });
+
+  app.delete('/api/admin/users/:email', requireAuth, requireAdminRole, async (req, res) => {
+    const email = normalizeEmail(req.params.email || '');
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required.' });
+    }
+
+    const all = (await dbService.getAllowlist()) as any[];
+    const admins = all.filter((u: any) => u.role === 'admin');
+    const target: any = all.find((u: any) => u.email === email);
+    if (!target) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+    if (target.role === 'admin' && admins.length <= 1) {
+      return res.status(400).json({ error: 'Cannot remove the last admin user.' });
+    }
+
+    await dbService.removeAllowlistUser(email);
+    return res.json({ success: true });
+  });
+
+  app.post("/api/settings", requireAuth, requireAdminRole, validateRequest(SettingsRequestSchema), async (req, res) => {
     try {
       const settings = req.body;
       await dbService.saveSettings(settings);
@@ -1575,15 +1645,20 @@ async function startServer() {
     }
   });
 
-  app.get("/api/settings", requireAdminAuth, async (req, res) => {
+  app.get("/api/settings", requireAuth, async (req, res) => {
     try {
-      res.json(await dbService.getSettings());
+      const settings = await dbService.getSettings();
+      const user = (req as any).authUser;
+      if (user?.role === 'admin') {
+        return res.json(settings);
+      }
+      return res.json({ ...settings, groqApiKey: '' });
     } catch (e) {
       res.status(500).json({ error: "Failed to read settings" });
     }
   });
 
-  app.post("/api/images/extract", requireAdminAuth, validateRequest(ImageExtractRequestSchema), async (req, res) => {
+  app.post("/api/images/extract", requireAuth, validateRequest(ImageExtractRequestSchema), async (req, res) => {
     const { sku, url, screenshotEnabled } = req.body;
     if (!sku || !url) {
       return res.status(400).json({ error: "SKU and URL are required" });
@@ -1808,7 +1883,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/images/render", requireAdminAuth, async (req, res) => {
+  app.post("/api/images/render", requireAuth, async (req, res) => {
     const { sku, url } = req.body || {};
     console.log('[IMAGE RENDER] Request:', { sku, url });
     
@@ -1861,7 +1936,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/images/:sku", requireAdminAuth, async (req, res) => {
+  app.delete("/api/images/:sku", requireAuth, async (req, res) => {
     try {
       const { sku } = req.params;
       const safeSku = sku.replace(/[^a-z0-9_-]/gi, '_');

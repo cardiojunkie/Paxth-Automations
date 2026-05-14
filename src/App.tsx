@@ -32,6 +32,17 @@ interface FirestoreHealth {
   initError?: string | null;
 }
 
+interface AuthUser {
+  email: string;
+  role: 'admin' | 'user';
+}
+
+interface AllowlistUser {
+  email: string;
+  role: 'admin' | 'user';
+  addedAt?: string | null;
+}
+
 
 export default function App() {
   const defaultSelectorPresets = [
@@ -62,8 +73,14 @@ export default function App() {
     selectorPresets: [] as {name: string, selector: string, strategy: string}[],
     plpSelectorPresets: [] as {name: string, selector: string}[]
   });
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [adminConfigured, setAdminConfigured] = useState(true);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [allowlistUsers, setAllowlistUsers] = useState<AllowlistUser[]>([]);
+  const [newUserEmail, setNewUserEmail] = useState('');
+  const [newUserRole, setNewUserRole] = useState<'admin' | 'user'>('user');
+  const [isManagingUsers, setIsManagingUsers] = useState(false);
   const [firestoreHealth, setFirestoreHealth] = useState<FirestoreHealth | null>(null);
   const [isFirestoreStatusLoading, setIsFirestoreStatusLoading] = useState(true);
   const [newAttrName, setNewAttrName] = useState('');
@@ -105,6 +122,7 @@ export default function App() {
   
   // Sync core data
   useEffect(() => {
+    if (!authUser) return;
     const fetchData = async () => {
       try {
         const safeFetch = async (url: string, defaultVal: any) => {
@@ -132,7 +150,7 @@ export default function App() {
       }
     };
     fetchData();
-  }, []);
+  }, [authUser]);
 
   const fetchJobs = async (params?: { cursor?: string; search?: string; append?: boolean }) => {
     try {
@@ -237,62 +255,134 @@ export default function App() {
   const [discoveredLinks, setDiscoveredLinks] = useState<{href: string, text: string}[]>([]);
   const [discoveryMode, setDiscoveryMode] = useState(false);
   const [isDiscovering, setIsDiscovering] = useState(false);
+  const isAdmin = authUser?.role === 'admin';
 
-  const verifyAdminKey = async (candidate: string) => {
+  const hydrateCoreData = async () => {
     try {
-      const res = await apiFetch('/api/admin/login', {
+      const [idxRes, harvestRes, settingsRes] = await Promise.all([
+        apiFetch('/api/sku/index'),
+        apiFetch('/api/harvest'),
+        apiFetch('/api/settings')
+      ]);
+
+      if (idxRes.ok) {
+        const idx = await idxRes.json();
+        setSkuIndex(Array.isArray(idx) ? idx : []);
+      }
+      if (harvestRes.ok) {
+        const harvest = await harvestRes.json();
+        setHarvestFiles(Array.isArray(harvest) ? harvest : []);
+      }
+      if (settingsRes.ok) {
+        const settings = await settingsRes.json();
+        setAppSettings(prev => ({ ...prev, ...settings }));
+      }
+      fetchJobs();
+    } catch {
+      // Keep app usable even if hydration partially fails.
+    }
+  };
+
+  const loginWithEmail = async (email: string) => {
+    try {
+      const res = await apiFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: candidate }),
+        body: JSON.stringify({ email }),
         credentials: 'include'
       });
       if (!res.ok) return false;
-      // Admin token is now stored in httpOnly cookie (secure, cannot be accessed from JS)
-      setIsAdmin(true);
-      try {
-        const [idxRes, harvestRes, settingsRes] = await Promise.all([
-          apiFetch('/api/sku/index'),
-          apiFetch('/api/harvest'),
-          apiFetch('/api/settings')
-        ]);
-
-        if (idxRes.ok) {
-          const idx = await idxRes.json();
-          setSkuIndex(Array.isArray(idx) ? idx : []);
-        }
-        if (harvestRes.ok) {
-          const harvest = await harvestRes.json();
-          setHarvestFiles(Array.isArray(harvest) ? harvest : []);
-        }
-        if (settingsRes.ok) {
-          const settings = await settingsRes.json();
-          setAppSettings(prev => ({ ...prev, ...settings }));
-        }
-        fetchJobs();
-      } catch {
-        // Keep login success even if post-login hydration fails.
+      const payload = await res.json().catch(() => null);
+      if (payload?.user) {
+        setAuthUser(payload.user);
       }
+      await hydrateCoreData();
       return true;
     } catch {
       return false;
     }
   };
 
-  const requestAdminUnlock = async () => {
-    const key = window.prompt('Enter admin key');
-    if (!key) return;
-    const ok = await verifyAdminKey(key.trim());
+  const submitLogin = async () => {
+    if (!loginEmail.trim()) {
+      addLog('error', 'Email is required.');
+      return;
+    }
+    setIsLoggingIn(true);
+    const ok = await loginWithEmail(loginEmail.trim().toLowerCase());
+    setIsLoggingIn(false);
     if (ok) {
-      addLog('success', 'Admin mode unlocked.');
+      addLog('success', 'Logged in successfully.');
     } else {
-      addLog('error', 'Invalid admin key.');
+      addLog('error', 'Login failed. Ensure your email is in allowlist.');
     }
   };
 
-  const lockAdminMode = () => {
-    setIsAdmin(false);
-    // Admin token cookie is cleared by the server (no client-side action needed)
-    addLog('system', 'Admin mode locked.');
+  const logout = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Best effort logout.
+    }
+    setAuthUser(null);
+    setAllowlistUsers([]);
+    addLog('system', 'Session ended.');
+  };
+
+  const fetchAllowlistUsers = async () => {
+    if (!isAdmin) return;
+    try {
+      const res = await apiFetch('/api/admin/users');
+      if (!res.ok) return;
+      const users = await res.json();
+      setAllowlistUsers(Array.isArray(users) ? users : []);
+    } catch {
+      // Ignore temporary load errors in admin panel.
+    }
+  };
+
+  const upsertAllowlistUser = async () => {
+    if (!isAdmin || !newUserEmail.trim()) return;
+    setIsManagingUsers(true);
+    try {
+      const res = await apiFetch('/api/admin/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: newUserEmail.trim().toLowerCase(), role: newUserRole })
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Failed to save user');
+      }
+      setNewUserEmail('');
+      setNewUserRole('user');
+      await fetchAllowlistUsers();
+      addLog('success', 'User role updated.');
+    } catch (e: any) {
+      addLog('error', e?.message || 'Failed to save user');
+    } finally {
+      setIsManagingUsers(false);
+    }
+  };
+
+  const deleteAllowlistUser = async (email: string) => {
+    if (!isAdmin) return;
+    setIsManagingUsers(true);
+    try {
+      const res = await apiFetch(`/api/admin/users/${encodeURIComponent(email)}`, {
+        method: 'DELETE'
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Failed to remove user');
+      }
+      await fetchAllowlistUsers();
+      addLog('success', `Removed ${email} from allowlist.`);
+    } catch (e: any) {
+      addLog('error', e?.message || 'Failed to remove user');
+    } finally {
+      setIsManagingUsers(false);
+    }
   };
 
   const [imageSku, setImageSku] = useState('');
@@ -455,25 +545,37 @@ export default function App() {
     { type: 'system', message: 'PaXth Engine initialized (Playwright Mode). System standby.', timestamp: new Date().toLocaleTimeString() }
   ]);
 
-  // Load admin status and restore admin state from existing httpOnly session cookie.
+  // Restore session state from server cookie.
   useEffect(() => {
-    apiFetch('/api/admin/status')
-      .then(async (res) => {
-        const data = await res.json();
-        setAdminConfigured(!!data.adminConfigured);
-      })
-      .catch(() => setAdminConfigured(false));
-
-    apiFetch('/api/settings')
-      .then((res) => {
+    let mounted = true;
+    const restoreSession = async () => {
+      try {
+        const res = await apiFetch('/api/auth/me');
+        if (!mounted) return;
         if (res.ok) {
-          setIsAdmin(true);
+          const payload = await res.json();
+          setAuthUser(payload.user || null);
+          await hydrateCoreData();
+        } else {
+          setAuthUser(null);
         }
-      })
-      .catch(() => {
-        // No active admin cookie yet.
-      });
+      } catch {
+        if (mounted) setAuthUser(null);
+      } finally {
+        if (mounted) setIsAuthChecking(false);
+      }
+    };
+    restoreSession();
+    return () => {
+      mounted = false;
+    };
   }, []);
+
+  useEffect(() => {
+    if (isAdmin) {
+      fetchAllowlistUsers();
+    }
+  }, [isAdmin]);
 
   useEffect(() => {
     let mounted = true;
@@ -889,7 +991,7 @@ export default function App() {
 
   const persistSettings = async (settings: any) => {
     if (!isAdmin) {
-      addLog('error', 'Admin mode is required to save Connectivity, mapping, and preset changes.');
+      addLog('error', 'Admin role is required to save Connectivity, mapping, and preset changes.');
       const res = await apiFetch('/api/settings');
       if (res.ok) {
         const fresh = await res.json();
@@ -1226,6 +1328,42 @@ export default function App() {
 
   return (
     <ErrorBoundary>
+      {isAuthChecking ? (
+        <div className="h-screen bg-brand-bg flex items-center justify-center text-white/70 font-mono uppercase tracking-widest text-xs">
+          Restoring session...
+        </div>
+      ) : !authUser ? (
+        <div className="h-screen bg-brand-bg flex items-center justify-center p-6">
+          <div className="w-full max-w-md bg-black/40 border border-white/10 rounded-3xl p-8 shadow-2xl">
+            <div className="space-y-2 mb-6">
+              <h1 className="text-2xl font-black tracking-tight text-white">Moos Studio Login</h1>
+              <p className="text-[11px] text-white/40 uppercase tracking-[0.2em]">Allowlist Session Access</p>
+            </div>
+            <div className="space-y-4">
+              <input
+                type="email"
+                value={loginEmail}
+                onChange={(e) => setLoginEmail(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !isLoggingIn) submitLogin();
+                }}
+                placeholder="name@company.com"
+                className="w-full bg-black/60 border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-500"
+              />
+              <button
+                onClick={submitLogin}
+                disabled={isLoggingIn || !loginEmail.trim()}
+                className="w-full py-3 rounded-2xl bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 disabled:text-white/50 text-white text-[11px] font-bold uppercase tracking-widest transition-colors"
+              >
+                {isLoggingIn ? 'Signing In...' : 'Sign In'}
+              </button>
+              <p className="text-[10px] text-white/35 leading-relaxed">
+                Access is role-based. Admin users can edit schema, mapping rules, and selector presets.
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : (
       <div className="flex flex-col h-screen overflow-hidden bg-brand-bg font-sans selection:bg-blue-500/30">
         {/* TOP NAVIGATION BAR */}
       <nav id="top-nav" className="h-14 border-b border-white/10 flex items-center justify-between px-6 bg-black/40 z-10 backdrop-blur-sm">
@@ -1239,11 +1377,11 @@ export default function App() {
         </div>
         <div className="flex items-center gap-6">
           <button
-            onClick={isAdmin ? lockAdminMode : requestAdminUnlock}
-            className={`text-[10px] px-3 py-1.5 rounded border uppercase tracking-widest font-bold transition-colors ${isAdmin ? 'border-green-500/40 text-green-400 hover:bg-green-500/10' : 'border-white/20 text-white/50 hover:text-white/80 hover:border-white/40'}`}
-            title={adminConfigured ? 'Admin access controls schema and preset changes' : 'Set ADMIN_KEY on server to enable admin controls'}
+            onClick={authUser ? logout : submitLogin}
+            className={`text-[10px] px-3 py-1.5 rounded border uppercase tracking-widest font-bold transition-colors ${authUser ? 'border-green-500/40 text-green-400 hover:bg-green-500/10' : 'border-white/20 text-white/50 hover:text-white/80 hover:border-white/40'}`}
+            title={authUser ? `${authUser.email} (${authUser.role})` : 'Login with allowlisted email'}
           >
-            {isAdmin ? 'Admin Unlocked' : 'Admin Locked'}
+            {authUser ? `Logout (${authUser.role})` : 'Login'}
           </button>
           <div className="flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${isScraping ? 'bg-blue-500 animate-pulse' : 'bg-green-500 status-pulse'} shadow-[0_0_8px_rgba(34,197,94,0.5)]`}></div>
@@ -2318,11 +2456,85 @@ export default function App() {
                                                 <p className="text-[10px] text-white/35 leading-relaxed">
                                                   {isAdmin
                                                     ? 'Use SAVE KEY to persist the Groq credential. WIPE clears the stored key immediately.'
-                                                    : 'Unlock Admin mode first, then use SAVE KEY to persist the Groq credential for mapping.'}
+                                                    : 'Admin role required to persist or wipe the Groq credential.'}
                                                 </p>
                                              </div>
                                           </div>
                                        </div>
+                                    </section>
+
+                                    <section className="space-y-6">
+                                      <div className="flex items-center gap-4">
+                                        <div className="w-14 h-14 bg-emerald-600/10 border border-emerald-500/20 rounded-2xl flex items-center justify-center shadow-inner">
+                                          <Database className="w-7 h-7 text-emerald-400" />
+                                        </div>
+                                        <div>
+                                          <h3 className="text-xl font-bold text-white leading-none">Access Roles</h3>
+                                          <p className="text-[10px] text-white/30 uppercase tracking-widest mt-2">Allowlist Administration</p>
+                                        </div>
+                                      </div>
+                                      <div className="bg-[#0a0a0a] border border-white/5 rounded-3xl p-8 shadow-2xl">
+                                        {isAdmin ? (
+                                          <div className="space-y-4">
+                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                              <input
+                                                type="email"
+                                                value={newUserEmail}
+                                                onChange={(e) => setNewUserEmail(e.target.value)}
+                                                placeholder="user@company.com"
+                                                className="md:col-span-2 bg-black/60 border border-white/10 rounded-xl px-4 py-3 text-xs text-white focus:outline-none focus:border-emerald-500"
+                                              />
+                                              <select
+                                                value={newUserRole}
+                                                onChange={(e) => setNewUserRole((e.target.value as 'admin' | 'user'))}
+                                                className="bg-black/60 border border-white/10 rounded-xl px-3 py-3 text-xs text-white focus:outline-none focus:border-emerald-500"
+                                              >
+                                                <option value="user">user</option>
+                                                <option value="admin">admin</option>
+                                              </select>
+                                            </div>
+                                            <div className="flex gap-3">
+                                              <button
+                                                onClick={upsertAllowlistUser}
+                                                disabled={isManagingUsers || !newUserEmail.trim()}
+                                                className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-600/40 disabled:text-white/50 text-white text-[10px] font-bold uppercase tracking-widest"
+                                              >
+                                                {isManagingUsers ? 'Saving...' : 'Add/Update User'}
+                                              </button>
+                                              <button
+                                                onClick={fetchAllowlistUsers}
+                                                disabled={isManagingUsers}
+                                                className="px-5 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 text-[10px] font-bold uppercase tracking-widest border border-white/10"
+                                              >
+                                                Refresh
+                                              </button>
+                                            </div>
+                                            <div className="space-y-2 max-h-52 overflow-y-auto custom-scrollbar pr-1">
+                                              {allowlistUsers.map((u) => (
+                                                <div key={u.email} className="flex items-center justify-between gap-3 bg-white/[0.03] border border-white/10 rounded-xl px-3 py-2">
+                                                  <div className="min-w-0">
+                                                    <div className="text-xs text-white truncate">{u.email}</div>
+                                                    <div className="text-[10px] text-white/40 uppercase tracking-widest">{u.role}</div>
+                                                  </div>
+                                                  <button
+                                                    onClick={() => deleteAllowlistUser(u.email)}
+                                                    disabled={isManagingUsers || u.email === authUser?.email}
+                                                    className="px-3 py-1 rounded-lg bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white disabled:opacity-40 text-[10px] font-bold uppercase tracking-wider"
+                                                    title={u.email === authUser?.email ? 'Cannot delete your own active account' : 'Remove user'}
+                                                  >
+                                                    Remove
+                                                  </button>
+                                                </div>
+                                              ))}
+                                              {allowlistUsers.length === 0 && (
+                                                <p className="text-[11px] text-white/40">No users found.</p>
+                                              )}
+                                            </div>
+                                          </div>
+                                        ) : (
+                                          <p className="text-[11px] text-white/40">Admin role required to manage users and roles.</p>
+                                        )}
+                                      </div>
                                     </section>
                                  </div>
 
@@ -3618,7 +3830,8 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
-    </div>
+      </div>
+      )}
     </ErrorBoundary>
   );
 }

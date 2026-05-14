@@ -46,12 +46,23 @@ export const SettingsRequestSchema = z.object({
   selectors: z.record(z.any()).optional(),
 });
 
+export const LoginRequestSchema = z.object({
+  email: z.string().email('Valid email is required'),
+});
+
+export const AllowlistUpsertRequestSchema = z.object({
+  email: z.string().email('Valid email is required'),
+  role: z.enum(['admin', 'user']),
+});
+
 export type ScrapeRequest = z.infer<typeof ScrapeRequestSchema>;
 export type DiscoverRequest = z.infer<typeof DiscoverRequestSchema>;
 export type AnalyzeRequest = z.infer<typeof AnalyzeRequestSchema>;
 export type ImageExtractRequest = z.infer<typeof ImageExtractRequestSchema>;
 export type SKUIndexRequest = z.infer<typeof SKUIndexRequestSchema>;
 export type SettingsRequest = z.infer<typeof SettingsRequestSchema>;
+export type LoginRequest = z.infer<typeof LoginRequestSchema>;
+export type AllowlistUpsertRequest = z.infer<typeof AllowlistUpsertRequestSchema>;
 
 /** Pagination query-string schema. Used with z.parse(req.query). */
 export const PageParamsSchema = z.object({
