@@ -5,12 +5,14 @@ services:
     dockerfilePath: ./Dockerfile
     plan: standard
     autoDeploy: true
-    healthCheckPath: /api/sku/index
+    healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
         value: "3000"
+      - key: ADMIN_KEY
+        sync: false
       - key: FIRESTORE_MODE
         value: all
       - key: GROQ_API_KEY

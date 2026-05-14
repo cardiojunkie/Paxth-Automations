@@ -1,0 +1,178 @@
+// Shared type definitions used across frontend modules
+
+export type LogType = 'system' | 'debug' | 'success' | 'action' | 'network' | 'wait' | 'skill' | 'error';
+
+export interface LogEntry {
+  type: LogType;
+  message: string;
+  timestamp: string;
+}
+
+export type ExtractionStrategy =
+  | 'LLMExtractionStrategy'
+  | 'GroqExtractionStrategy'
+  | 'JsonLdExtractionStrategy'
+  | 'WholeCaptureStrategy';
+
+export type ScrapeMode = 'single' | 'batch' | 'deep';
+
+export interface FirestoreHealth {
+  mode: string;
+  connected: boolean;
+  projectId?: string | null;
+  databaseId?: string | null;
+  authSource?: string | null;
+  initError?: string | null;
+}
+
+export interface SelectorPreset {
+  name: string;
+  selector: string;
+  strategy: string;
+}
+
+export interface PlpPreset {
+  name: string;
+  selector: string;
+}
+
+export interface AttributeSet {
+  name: string;
+  fields: string[];
+  mdRules?: string;
+  mdFileName?: string;
+}
+
+export interface AppSettings {
+  title: string;
+  bullets: string;
+  description: string;
+  keywords: string;
+  groqApiKey: string;
+  attributeSets: AttributeSet[];
+  selectorPresets: SelectorPreset[];
+  plpSelectorPresets: PlpPreset[];
+}
+
+export interface SkuRecord {
+  sku?: string;
+  SKU?: string;
+  brand?: string;
+  Brand?: string;
+  ean?: string;
+  shipping_weight?: string;
+  product_type?: string;
+  attribute_set?: string;
+  Attribute_Set?: string;
+  base_code?: string;
+  sap_data?: string;
+  pdf_text?: string;
+  title?: string;
+  Name?: string;
+  category?: string;
+  [key: string]: unknown;
+}
+
+export interface HarvestFile {
+  name: string;
+  size: number;
+  mtime: Date | string;
+}
+
+export interface Job {
+  sku: string;
+  /** Lifecycle status. 'queued'/'running' are transient states for in-flight queue jobs. */
+  status: 'ready' | 'completed' | 'pending' | 'queued' | 'running' | 'failed';
+  title?: string;
+  attribute_set?: string;
+  Attribute_Set?: string;
+  schema?: string;
+  Schema?: string;
+  harvestFile?: string;
+  hasPdf?: boolean;
+  hasSapData?: boolean;
+}
+
+// ── Pagination ───────────────────────────────────────────────────────────────
+
+export interface PageParams {
+  /** Opaque cursor from a previous response's `nextCursor` field. */
+  cursor?: string;
+  /** Max items to return. Default 50, max 200. */
+  limit?: number;
+  /** Case-insensitive substring match on sku / title. */
+  search?: string;
+  /** Filter by lifecycle status. Defaults to 'all'. */
+  statusFilter?: 'pending' | 'ready' | 'completed' | 'all';
+}
+
+export interface PaginatedResponse<T> {
+  items: T[];
+  /** Pass as `cursor` to fetch the next page. Null when on the last page. */
+  nextCursor: string | null;
+  hasMore: boolean;
+  /** Approximate total count — may not be exact in all backends. */
+  total?: number;
+}
+
+// ── Async job queue ──────────────────────────────────────────────────────────
+
+export type AsyncJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'retrying';
+export type AsyncJobType = 'scrape' | 'discover' | 'inspect' | 'analyze' | 'run_job' | 'export_xlsx';
+
+export interface AsyncJob {
+  id: string;
+  type: AsyncJobType;
+  status: AsyncJobStatus;
+  payload: Record<string, unknown>;
+  result?: unknown;
+  error?: string;
+  createdAt: string;
+  startedAt?: string;
+  completedAt?: string;
+  retryCount: number;
+  durationMs?: number;
+}
+
+export interface EnqueueResponse {
+  jobId: string;
+  status: 'queued';
+  queuePosition?: number;
+}
+
+export interface ExtractedImage {
+  sku: string;
+  originalUrl: string;
+  imagePath: string;
+  screenshotPath?: string;
+}
+
+export interface DiscoveredLink {
+  href: string;
+  text: string;
+}
+
+export interface ScrapeResponse {
+  text: string;
+  groqResult?: string | null;
+  imageUrls?: string[];
+  screenshot?: string | null;
+  title?: string | null;
+  secondary?: {
+    text: string;
+    groqResult?: string | null;
+    title?: string | null;
+    strategy?: string;
+  } | null;
+}
+
+export interface AnalyzeResponse {
+  selectors: string;
+  strategy: ExtractionStrategy;
+  reasoning: string;
+  screenshot?: string | null;
+}
+
+export interface DiscoverResponse {
+  links: DiscoveredLink[];
+}

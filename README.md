@@ -135,42 +135,37 @@ fuser -k 3000/tcp 24678/tcp 2>/dev/null; npm run dev
 | `FIRESTORE_MODE` | No | `all` (default) · `outputs-only` · `off` |
 | `NODE_ENV` | No | `production` in deployed environments |
 | `PORT` | No | Server port (default `3000`) |
+| `CORS_ORIGINS` | Recommended for cross-origin UI | Comma-separated allowed browser origins (set `*` only in trusted internal networks) |
 | `MAX_CONCURRENT_BROWSER_TASKS` | No | Max parallel browser sessions (default `2`) |
-| `ADMIN_KEY` | No | Static key for admin API auth |
+| `ADMIN_KEY` | Yes | Static key for admin API auth (server fails to start without it) |
 
 > **Security:** Never commit `firebase-service-account.json` or `GROQ_API_KEY` to version control. Use environment variables in all deployed environments.
 
 ---
 
-## Deploy on Render
+## Deploy with Docker (Any Platform)
 
-This repo ships with `render.yaml` and a multi-stage `Dockerfile` for zero-config Render deploys.
+Use the included multi-stage `Dockerfile` on any Docker-compatible host (VPS, Railway, Fly.io, Kubernetes, ECS, etc.).
 
-### One-Click Blueprint Deploy
+### Required runtime environment
 
-1. Push `main` to GitHub *(already done)*
-2. In Render: **New +** → **Blueprint** → select this repo
-3. Render auto-detects `render.yaml` and creates the service
-4. Add the required environment variables in Render dashboard:
-   - `GROQ_API_KEY`
-   - `FIREBASE_SERVICE_ACCOUNT_JSON` *(paste full JSON as a single-line string)*
-5. Click **Deploy**
+1. Set `ADMIN_KEY` (required to boot).
+2. Set `GROQ_API_KEY` if AI enrichment is needed.
+3. Set `FIREBASE_SERVICE_ACCOUNT_JSON` for Firestore access.
+4. Set `CORS_ORIGINS` when frontend is served from a different origin.
 
-### Manual Setup (Web Service)
+### Recommended runtime settings
 
 | Setting | Value |
 |---|---|
 | Runtime | Docker |
 | Dockerfile path | `./Dockerfile` |
-| Instance type | Standard (≥ 512 MB RAM required for Chromium) |
 | Port | `3000` |
-| Health check path | `/api/sku/index` |
+| Health check path | `/api/admin/status` |
 
-> First build takes 8–12 minutes due to Chromium installation. Subsequent builds are cached and much faster.
+### Persistent storage (optional)
 
-### Persistent Storage (Optional)
-
-Add Render Disks if you need output files to survive redeploys:
+Mount these paths if you need files to survive container restarts:
 
 | Mount Path | Purpose |
 |---|---|
@@ -188,7 +183,9 @@ docker build -t moosstudioza .
 
 # Run
 docker run -p 3000:3000 \
+  -e ADMIN_KEY=change-this \
   -e GROQ_API_KEY=your_key \
+  -e CORS_ORIGINS=https://your-frontend-domain.com \
   -e FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}' \
   moosstudioza
 ```

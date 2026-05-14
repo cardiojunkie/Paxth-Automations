@@ -1,4 +1,8 @@
 import { apiFetch } from "./auth";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { PresetDropdown } from "./components/PresetDropdown";
+import { SkillCard } from "./components/SkillCard";
+import type { SkuRecord, HarvestFile, Job } from "./types";
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -6,50 +10,12 @@ import { apiFetch } from "./auth";
 
 import { Activity, Beaker, Box, Cpu, Database, ExternalLink, Flame, Info, Layout, Play, Terminal, Zap, Loader2, X, Maximize2, Copy, Check, Eye, AlertCircle, FileSpreadsheet, Upload, Settings, Briefcase, Search, FileText, Globe, Key, List, AlignLeft, Plus, Archive, Trash2, RefreshCw, Network, Image as ImageIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import React, { useState, useRef, useEffect, Component, ErrorInfo, ReactNode } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import * as XLSX from 'xlsx';
 
-// Error Boundary for UI Stability
-class ErrorBoundary extends Component<{children: ReactNode}, {hasError: boolean, error: Error | null}> {
-  constructor(props: {children: ReactNode}) {
-    super(props);
-    this.state = { hasError: false, error: null };
-  }
-
-  static getDerivedStateFromError(error: Error) {
-    return { hasError: true, error };
-  }
-
-  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error("UI CRASH DETECTED:", error, errorInfo);
-  }
-
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div className="flex flex-col items-center justify-center min-h-screen bg-[#050505] text-white p-8 overflow-hidden w-full h-full">
-          <AlertCircle className="w-12 h-12 text-blue-500 mb-4" />
-          <h1 className="text-xl font-bold mb-2">Engine Interface Error</h1>
-          <p className="text-white/40 text-sm mb-6 max-w-md text-center">
-            The dashboard encountered a rendering issue while processing the last results. This is often caused by very complex data structures.
-          </p>
-          <pre className="bg-blue-500/10 border border-blue-500/20 p-4 rounded-lg text-xs font-mono text-blue-400 mb-6 max-w-full overflow-auto">
-            {this.state.error?.message}
-          </pre>
-          <button 
-            onClick={() => window.location.reload()}
-            className="px-6 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-bold transition-all"
-          >
-            Reconnect Dashboard
-          </button>
-        </div>
-      );
-    }
-
-    return this.props.children;
-  }
-}
+// ErrorBoundary, PresetDropdown, SkillCard are imported from ./components/
+// Types LogEntry and FirestoreHealth are defined here for local use in App.tsx
 
 interface LogEntry {
   type: 'system' | 'debug' | 'success' | 'action' | 'network' | 'wait' | 'skill' | 'error';
@@ -66,62 +32,6 @@ interface FirestoreHealth {
   initError?: string | null;
 }
 
-const PresetDropdown = ({ presets, onSelect, onDelete, defaultText, disabled, isPlp = false }: {
-  presets: any[];
-  onSelect: (item: any) => void;
-  onDelete: (index: number) => void;
-  defaultText: string;
-  disabled?: boolean;
-  isPlp?: boolean;
-}) => {
-  const [isOpen, setIsOpen] = useState(false);
-  const dropdownRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
-        setIsOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
-
-  return (
-    <div className="relative" ref={dropdownRef}>
-      <button 
-        type="button"
-        onClick={() => { if (!disabled) setIsOpen(!isOpen); }}
-        className={`w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs font-mono text-blue-400 focus:outline-none focus:border-blue-500 flex justify-between items-center transition-colors ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-white/10'}`}
-      >
-        <span className="truncate pr-2">{defaultText}</span>
-        <span className="text-[10px] text-white/40">▼</span>
-      </button>
-      {isOpen && (
-        <div className="absolute top-full left-0 w-full mt-1 bg-zinc-900 border border-white/10 rounded overflow-hidden z-[60] shadow-xl">
-          <div className="max-h-48 overflow-y-auto custom-scrollbar">
-            {presets.length === 0 ? (
-              <div className="p-3 text-[10px] text-white/30 italic text-center">No presets saved</div>
-            ) : (
-              presets.map((item, idx) => (
-                <div key={idx} className="flex items-center justify-between p-2 hover:bg-white/10 group cursor-pointer transition-colors border-b border-white/5 last:border-0" onClick={() => { onSelect(item); setIsOpen(false); }}>
-                  <span className="font-mono text-blue-400 hover:text-blue-300 text-[10px] truncate max-w-[80%]">{item.name}</span>
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); onDelete(idx); }}
-                    className="flex justify-center items-center p-1 bg-red-500/10 hover:bg-red-500 text-red-500 hover:text-white rounded opacity-40 group-hover:opacity-100 transition-all focus:opacity-100 h-6 w-6"
-                    title={isPlp ? "Delete PLP Preset" : "Delete Preset"}
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
 
 export default function App() {
   const defaultSelectorPresets = [
@@ -139,9 +49,9 @@ export default function App() {
   const [settingsSubModule, setSettingsSubModule] = useState<'api' | 'mapping' | 'indexer'>('api');
   const [editingGenerator, setEditingGenerator] = useState<string | null>(null);
   const [editingSetRules, setEditingSetRules] = useState<number | null>(null);
-  const [skuIndex, setSkuIndex] = useState<any[]>([]);
-  const [jobs, setJobs] = useState<any[]>([]);
-  const [harvestFiles, setHarvestFiles] = useState<any[]>([]);
+  const [skuIndex, setSkuIndex] = useState<SkuRecord[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [harvestFiles, setHarvestFiles] = useState<HarvestFile[]>([]);
   const [appSettings, setAppSettings] = useState({ 
     title: "", 
     bullets: "", 
@@ -162,7 +72,7 @@ export default function App() {
   const [url, setUrl] = useState('');
   const [batchFile, setBatchFile] = useState<File | null>(null);
   const [skuFile, setSkuFile] = useState<File | null>(null);
-  const [batchData, setBatchData] = useState<any[]>([]);
+  const [batchData, setBatchData] = useState<SkuRecord[]>([]);
   const [strategy, setStrategy] = useState('JsonLdExtractionStrategy');
   const [selector, setSelector] = useState('');
   
@@ -224,14 +134,36 @@ export default function App() {
     fetchData();
   }, []);
 
-  const fetchJobs = async () => {
+  const fetchJobs = async (params?: { cursor?: string; search?: string; append?: boolean }) => {
     try {
-      const res = await apiFetch('/api/jobs');
+      const searchParam = params?.search !== undefined ? params.search : jobsSearch;
+      const qs = new URLSearchParams({ limit: '50' });
+      if (params?.cursor) qs.set('cursor', params.cursor);
+      if (searchParam) qs.set('search', searchParam);
+
+      const res = await apiFetch(`/api/jobs?${qs}`);
       if (!res.ok) return;
       const text = await res.text();
-      let data = [];
+      let data: any;
       try { data = JSON.parse(text); } catch { return; }
-      setJobs(Array.isArray(data) ? data : []);
+
+      // Handle both legacy array format and new paginated format
+      if (Array.isArray(data)) {
+        setJobs(data);
+        setJobsHasMore(false);
+        setJobsNextCursor(null);
+        setJobsTotal(data.length);
+      } else {
+        const items = Array.isArray(data.items) ? data.items : [];
+        if (params?.append) {
+          setJobs(prev => [...prev, ...items]);
+        } else {
+          setJobs(items);
+        }
+        setJobsHasMore(!!data.hasMore);
+        setJobsNextCursor(data.nextCursor ?? null);
+        setJobsTotal(data.total);
+      }
     } catch (e) {
       console.error("Failed to fetch jobs", e);
     }
@@ -293,6 +225,11 @@ export default function App() {
   const [loadingHarvestFile, setLoadingHarvestFile] = useState(false);
   const [selectedJobs, setSelectedJobs] = useState<string[]>([]);
   const [jobAiModels, setJobAiModels] = useState<{[sku:string]: string}>({});
+  // Pagination state for the Jobs module
+  const [jobsSearch, setJobsSearch] = useState('');
+  const [jobsNextCursor, setJobsNextCursor] = useState<string | null>(null);
+  const [jobsHasMore, setJobsHasMore] = useState(false);
+  const [jobsTotal, setJobsTotal] = useState<number | undefined>(undefined);
   const [currentScreenshot, setCurrentScreenshot] = useState<string | null>(null);
   const [isScreenshotExpanded, setIsScreenshotExpanded] = useState(false);
   const [viewingPdfSku, setViewingPdfSku] = useState<string | null>(null);
@@ -306,12 +243,35 @@ export default function App() {
       const res = await apiFetch('/api/admin/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: candidate })
+        body: JSON.stringify({ key: candidate }),
+        credentials: 'include'
       });
       if (!res.ok) return false;
-      (window as any)._adminKey = candidate;
-      localStorage.setItem('moos_admin_key', candidate);
+      // Admin token is now stored in httpOnly cookie (secure, cannot be accessed from JS)
       setIsAdmin(true);
+      try {
+        const [idxRes, harvestRes, settingsRes] = await Promise.all([
+          apiFetch('/api/sku/index'),
+          apiFetch('/api/harvest'),
+          apiFetch('/api/settings')
+        ]);
+
+        if (idxRes.ok) {
+          const idx = await idxRes.json();
+          setSkuIndex(Array.isArray(idx) ? idx : []);
+        }
+        if (harvestRes.ok) {
+          const harvest = await harvestRes.json();
+          setHarvestFiles(Array.isArray(harvest) ? harvest : []);
+        }
+        if (settingsRes.ok) {
+          const settings = await settingsRes.json();
+          setAppSettings(prev => ({ ...prev, ...settings }));
+        }
+        fetchJobs();
+      } catch {
+        // Keep login success even if post-login hydration fails.
+      }
       return true;
     } catch {
       return false;
@@ -331,8 +291,7 @@ export default function App() {
 
   const lockAdminMode = () => {
     setIsAdmin(false);
-    (window as any)._adminKey = null;
-    localStorage.removeItem('moos_admin_key');
+    // Admin token cookie is cleared by the server (no client-side action needed)
     addLog('system', 'Admin mode locked.');
   };
 
@@ -496,7 +455,7 @@ export default function App() {
     { type: 'system', message: 'PaXth Engine initialized (Playwright Mode). System standby.', timestamp: new Date().toLocaleTimeString() }
   ]);
 
-  // Load admin status and attempt auto-unlock from local storage
+  // Load admin status and restore admin state from existing httpOnly session cookie.
   useEffect(() => {
     apiFetch('/api/admin/status')
       .then(async (res) => {
@@ -505,10 +464,15 @@ export default function App() {
       })
       .catch(() => setAdminConfigured(false));
 
-    const cachedKey = localStorage.getItem('moos_admin_key');
-    if (cachedKey) {
-      verifyAdminKey(cachedKey);
-    }
+    apiFetch('/api/settings')
+      .then((res) => {
+        if (res.ok) {
+          setIsAdmin(true);
+        }
+      })
+      .catch(() => {
+        // No active admin cookie yet.
+      });
   }, []);
 
   useEffect(() => {
@@ -824,7 +788,7 @@ export default function App() {
     setAppSettings(updatedSettings);
     persistSettings(updatedSettings);
   };
-  const [viewingOutput, setViewingOutput] = useState<any | null>(null);
+  const [viewingOutput, setViewingOutput] = useState<SkuRecord | null>(null);
   const [editingOutputSku, setEditingOutputSku] = useState<string | null>(null);
   const [isSavingOutput, setIsSavingOutput] = useState(false);
 
@@ -903,6 +867,10 @@ export default function App() {
   const [isScraping, setIsScraping] = useState(false);
   const [progress, setProgress] = useState(0);
   const [extractionResult, setExtractionResult] = useState<string | null>(null);
+  const [isEditingPrimary, setIsEditingPrimary] = useState(false);
+  const [editedPrimaryResult, setEditedPrimaryResult] = useState<string>('');
+  const [isEditingSecondary, setIsEditingSecondary] = useState(false);
+  const [editedSecondaryResult, setEditedSecondaryResult] = useState<string>('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -1175,6 +1143,38 @@ export default function App() {
     setExtractionResult(fullReport);
     setIsScraping(false);
     addLog('system', 'Deep Harvest Cycle complete. Master data compiled.');
+  };
+
+  const handleEditPrimary = () => {
+    setEditedPrimaryResult(extractionResult || '');
+    setIsEditingPrimary(true);
+  };
+
+  const handleSavePrimary = () => {
+    setExtractionResult(editedPrimaryResult);
+    setIsEditingPrimary(false);
+    addLog('success', 'Primary outcome updated.');
+  };
+
+  const handleCancelPrimary = () => {
+    setIsEditingPrimary(false);
+    setEditedPrimaryResult('');
+  };
+
+  const handleEditSecondary = () => {
+    setEditedSecondaryResult(extractionResult2 || '');
+    setIsEditingSecondary(true);
+  };
+
+  const handleSaveSecondary = () => {
+    setExtractionResult2(editedSecondaryResult);
+    setIsEditingSecondary(false);
+    addLog('success', 'Secondary outcome updated.');
+  };
+
+  const handleCancelSecondary = () => {
+    setIsEditingSecondary(false);
+    setEditedSecondaryResult('');
   };
 
   const handleSmartAnalyze = async () => {
@@ -2691,15 +2691,37 @@ export default function App() {
                               <summary className="h-10 border-b border-white/10 flex items-center px-4 justify-between bg-white/[0.02] cursor-pointer hover:bg-white/[0.04]">
                                 <div className="flex items-center gap-2"><Layout className="w-3.5 h-3.5 text-blue-400" /><span className="text-[10px] font-bold uppercase text-white/60">Logic Harvest Outcome (Primary)</span></div>
                                 <div className="flex gap-4 items-center">
-                                  <button onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(extractionResult!); setCopied(true); setTimeout(()=>setCopied(false), 2000); }} className="text-[10px] font-bold text-white/30 hover:text-white transition-colors">{copied ? 'COPIED' : 'COPY MD'}</button>
-                                  {currentScreenshot && (
-                                    <button onClick={(e) => { e.preventDefault(); setIsScreenshotExpanded(true) }} className="p-1 px-3 bg-purple-600/10 hover:bg-purple-600/20 text-purple-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">View Screenshot</button>
+                                  {!isEditingPrimary && (
+                                    <>
+                                      <button onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(extractionResult!); setCopied(true); setTimeout(()=>setCopied(false), 2000); }} className="text-[10px] font-bold text-white/30 hover:text-white transition-colors">{copied ? 'COPIED' : 'COPY MD'}</button>
+                                      {currentScreenshot && (
+                                        <button onClick={(e) => { e.preventDefault(); setIsScreenshotExpanded(true) }} className="p-1 px-3 bg-purple-600/10 hover:bg-purple-600/20 text-purple-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">View Screenshot</button>
+                                      )}
+                                      <button onClick={(e) => { e.preventDefault(); setIsModalOpen(true) }} className="p-1 px-3 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Expand View</button>
+                                      <button onClick={(e) => { e.preventDefault(); handleEditPrimary() }} className="p-1 px-3 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Edit</button>
+                                    </>
                                   )}
-                                  <button onClick={(e) => { e.preventDefault(); setIsModalOpen(true) }} className="p-1 px-3 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Expand View</button>
+                                  {isEditingPrimary && (
+                                    <>
+                                      <button onClick={(e) => { e.preventDefault(); handleSavePrimary() }} className="p-1 px-3 bg-green-600/10 hover:bg-green-600/20 text-green-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Save</button>
+                                      <button onClick={(e) => { e.preventDefault(); handleCancelPrimary() }} className="p-1 px-3 bg-red-600/10 hover:bg-red-600/20 text-red-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Cancel</button>
+                                    </>
+                                  )}
                                 </div>
                               </summary>
-                              <div className="p-6 overflow-y-auto max-h-[500px] custom-scrollbar prose prose-invert prose-xs max-w-none">
-                                <div className="markdown-body"><ReactMarkdown>{extractionResult}</ReactMarkdown></div>
+                              <div className="p-6 overflow-y-auto max-h-[500px] custom-scrollbar">
+                                {isEditingPrimary ? (
+                                  <textarea
+                                    value={editedPrimaryResult}
+                                    onChange={(e) => setEditedPrimaryResult(e.target.value)}
+                                    className="w-full h-[400px] p-4 bg-zinc-900 border border-white/10 rounded text-white text-sm font-mono resize-none focus:outline-none focus:border-blue-500"
+                                    placeholder="Edit harvest outcome..."
+                                  />
+                                ) : (
+                                  <div className="prose prose-invert prose-xs max-w-none">
+                                    <div className="markdown-body"><ReactMarkdown>{extractionResult}</ReactMarkdown></div>
+                                  </div>
+                                )}
                               </div>
                             </details>
                           )}
@@ -2708,9 +2730,34 @@ export default function App() {
                             <details className="group border border-white/10 bg-zinc-900/40 rounded-xl overflow-hidden shrink-0" open>
                               <summary className="h-10 border-b border-white/10 flex items-center px-4 justify-between bg-white/[0.02] cursor-pointer hover:bg-white/[0.04]">
                                 <div className="flex items-center gap-2"><Layout className="w-3.5 h-3.5 text-green-400" /><span className="text-[10px] font-bold uppercase text-white/60">Logic Harvest Outcome (Secondary)</span></div>
+                                <div className="flex gap-4 items-center">
+                                  {!isEditingSecondary && (
+                                    <>
+                                      <button onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(extractionResult2!); setCopied(true); setTimeout(()=>setCopied(false), 2000); }} className="text-[10px] font-bold text-white/30 hover:text-white transition-colors">{copied ? 'COPIED' : 'COPY MD'}</button>
+                                      <button onClick={(e) => { e.preventDefault(); handleEditSecondary() }} className="p-1 px-3 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Edit</button>
+                                    </>
+                                  )}
+                                  {isEditingSecondary && (
+                                    <>
+                                      <button onClick={(e) => { e.preventDefault(); handleSaveSecondary() }} className="p-1 px-3 bg-green-600/10 hover:bg-green-600/20 text-green-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Save</button>
+                                      <button onClick={(e) => { e.preventDefault(); handleCancelSecondary() }} className="p-1 px-3 bg-red-600/10 hover:bg-red-600/20 text-red-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Cancel</button>
+                                    </>
+                                  )}
+                                </div>
                               </summary>
-                              <div className="p-6 overflow-y-auto max-h-[500px] custom-scrollbar prose prose-invert prose-xs max-w-none">
-                                <div className="markdown-body"><ReactMarkdown>{extractionResult2}</ReactMarkdown></div>
+                              <div className="p-6 overflow-y-auto max-h-[500px] custom-scrollbar">
+                                {isEditingSecondary ? (
+                                  <textarea
+                                    value={editedSecondaryResult}
+                                    onChange={(e) => setEditedSecondaryResult(e.target.value)}
+                                    className="w-full h-[400px] p-4 bg-zinc-900 border border-white/10 rounded text-white text-sm font-mono resize-none focus:outline-none focus:border-blue-500"
+                                    placeholder="Edit harvest outcome..."
+                                  />
+                                ) : (
+                                  <div className="prose prose-invert prose-xs max-w-none">
+                                    <div className="markdown-body"><ReactMarkdown>{extractionResult2}</ReactMarkdown></div>
+                                  </div>
+                                )}
                               </div>
                             </details>
                           )}
@@ -2734,7 +2781,7 @@ export default function App() {
                       <p className="text-[11px] text-white/40 uppercase tracking-widest mt-1">Bind SKU Master with Collected Markdown Assets</p>
                     </div>
                     <div className="flex gap-3">
-                        <button onClick={fetchJobs} className="px-5 py-2.5 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-bold transition-all flex items-center gap-2 border border-white/10"><Activity className="w-3.5 h-3.5" /> RE-SYNC</button>
+                        <button onClick={() => fetchJobs()} className="px-5 py-2.5 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-bold transition-all flex items-center gap-2 border border-white/10"><Activity className="w-3.5 h-3.5" /> RE-SYNC</button>
                         <button onClick={() => {
                           const query = selectedJobs.length > 0 ? `?skus=${selectedJobs.join(',')}` : '';
                           window.open(`/api/outputs/xlsx${query}`)
@@ -2742,6 +2789,25 @@ export default function App() {
                            EXPORT MASTER XLS {selectedJobs.length > 0 ? `(${selectedJobs.length})` : ''}
                         </button>
                     </div>
+                  </div>
+
+                  {/* Search bar */}
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="text"
+                      value={jobsSearch}
+                      onChange={(e) => {
+                        setJobsSearch(e.target.value);
+                        fetchJobs({ search: e.target.value });
+                      }}
+                      placeholder="Search by SKU or title…"
+                      className="flex-1 px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-xs placeholder-white/30 focus:outline-none focus:border-white/20"
+                    />
+                    {jobsTotal !== undefined && (
+                      <span className="text-[11px] text-white/30 whitespace-nowrap">
+                        {jobs.length} / {jobsTotal} SKUs
+                      </span>
+                    )}
                   </div>
 
                   <div className="flex-1 rounded-xl border border-white/10 bg-[#0a0a0a]/80 overflow-hidden flex flex-col shadow-2xl">
@@ -2791,7 +2857,7 @@ export default function App() {
                                    <div className="flex items-center gap-2">
                                      <div className="text-green-500 flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full bg-green-500"></div> HARVEST_READY</div>
                                      <button 
-                                       onClick={() => handleHarvestDelete(job.harvestFile)}
+                                       onClick={() => handleHarvestDelete(job.harvestFile!)}
                                        className="w-4 h-4 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded flex items-center justify-center transition-all"
                                        title="Delete Harvest File"
                                      >
@@ -2872,6 +2938,16 @@ export default function App() {
                         ))}
                         {jobs.length === 0 && <div className="flex-1 flex items-center justify-center text-[10px] text-white/20 uppercase font-bold tracking-[0.2em] py-20 italic">Awaiting SKU Master Upload</div>}
                      </div>
+                     {jobsHasMore && (
+                       <div className="flex justify-center py-3 border-t border-white/5">
+                         <button
+                           onClick={() => fetchJobs({ cursor: jobsNextCursor ?? undefined, append: true })}
+                           className="px-6 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-bold border border-white/10 transition-all"
+                         >
+                           LOAD MORE
+                         </button>
+                       </div>
+                     )}
                   </div>
                </div>
              ) : currentModule === 'sku-indexer' ? (
@@ -3413,16 +3489,16 @@ export default function App() {
                   return keys.map((key) => (
                     <div key={key} className="space-y-2 text-left">
                       <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest pl-1">{key.replace(/_/g, ' ')}</label>
-                      {viewingOutput[key]?.toString().length > 100 || key.toLowerCase().includes('description') || key.toLowerCase().includes('bullets') ? (
+                      {((viewingOutput[key] as string | undefined)?.toString().length ?? 0) > 100 || key.toLowerCase().includes('description') || key.toLowerCase().includes('bullets') ? (
                          <textarea 
-                           value={viewingOutput[key] || ''} 
+                           value={(viewingOutput[key] as string) || ''} 
                            onChange={(e) => setViewingOutput({...viewingOutput, [key]: e.target.value})}
                            className="w-full bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/80 focus:border-blue-500/30 outline-none min-h-[120px] leading-relaxed transition-all"
                          />
                       ) : (
                          <input 
                            type="text" 
-                           value={viewingOutput[key] || ''} 
+                           value={(viewingOutput[key] as string) || ''} 
                            onChange={(e) => setViewingOutput({...viewingOutput, [key]: e.target.value})}
                            className="w-full bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/80 focus:border-blue-500/30 outline-none transition-all"
                          />
@@ -3546,39 +3622,4 @@ export default function App() {
     </ErrorBoundary>
   );
 }
-
-function SkillCard({ title, tag, description, type, active = false }: { title: string, tag: string, description: string, type: 'blue' | 'green' | 'muted' | 'yellow', active?: boolean }) {
-  const typeMap = {
-    blue: 'border-cyan-500 bg-cyan-950/20 text-cyan-400 shadow-[0_0_15px_rgba(6,182,212,0.1)]',
-    green: 'border-emerald-500 bg-emerald-950/20 text-emerald-400 shadow-[0_0_15px_rgba(16,185,129,0.1)]',
-    muted: 'border-white/10 bg-white/5 opacity-60 text-white/40',
-    yellow: 'border-amber-500 bg-amber-950/20 text-amber-400 shadow-[0_0_15px_rgba(245,158,11,0.1)]'
-  };
-
-  const indicatorMap = {
-    blue: 'bg-cyan-400',
-    green: 'bg-emerald-400',
-    muted: 'bg-white/20',
-    yellow: 'bg-amber-400'
-  };
-
-  return (
-    <motion.div 
-      whileHover={{ x: 2, scale: 1.01 }}
-      className={`relative p-3 border border-r-0 border-t-0 border-b-0 border-l-[3px] transition-all group overflow-hidden ${typeMap[type]}`}
-    >
-      <div className="absolute inset-0 bg-[linear-gradient(to_right,#ffffff05_1px,transparent_1px),linear-gradient(to_bottom,#ffffff05_1px,transparent_1px)] bg-[size:4px_4px] [mask-image:radial-gradient(ellipse_100%_100%_at_50%_50%,#000_10%,transparent_80%)] pointer-events-none opacity-50 mix-blend-overlay"></div>
-      
-      <div className="relative flex justify-between items-start mb-2 z-10">
-        <div className="flex items-center gap-2">
-          <div className={`w-1.5 h-1.5 rounded-none ${active ? 'animate-pulse shadow-[0_0_8px_currentColor]' : 'opacity-60'} ${indicatorMap[type]}`} style={{ boxShadow: active ? `0 0 8px currentColor` : 'none'}} />
-          <span className="text-[10px] uppercase tracking-[0.2em] font-bold font-mono text-white/90">{title}</span>
-        </div>
-        <span className={`text-[8px] px-1.5 py-px uppercase tracking-[0.2em] border border-current font-bold bg-black/60`}>
-          {tag}
-        </span>
-      </div>
-      <p className="relative z-10 text-[9px] text-white/50 leading-relaxed font-mono uppercase tracking-tight">{description}</p>
-    </motion.div>
-  );
-}
+// SkillCard is imported from ./components/SkillCard

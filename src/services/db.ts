@@ -4,10 +4,19 @@ import fs from 'fs';
 import path from 'path';
 
 type FirestoreScope = 'sku' | 'harvest' | 'settings' | 'allowlist' | 'outputs';
+type FirestoreModeType = 'all' | 'outputs-only' | 'off';
 
 // Default to full Firestore sync so admin updates are shared across users.
 // Allowed values: all | outputs-only | off
-const FIRESTORE_MODE = (process.env.FIRESTORE_MODE || 'all').toLowerCase();
+const FIRESTORE_MODE = (process.env.FIRESTORE_MODE || 'all').toLowerCase() as FirestoreModeType;
+
+// Validate FIRESTORE_MODE (Security)
+const VALID_FIRESTORE_MODES: FirestoreModeType[] = ['all', 'outputs-only', 'off'];
+if (!VALID_FIRESTORE_MODES.includes(FIRESTORE_MODE)) {
+  console.error(`[Firestore] FATAL: Invalid FIRESTORE_MODE='${FIRESTORE_MODE}'. Must be one of: ${VALID_FIRESTORE_MODES.join(', ')}`);
+  process.exit(1);
+}
+
 const canUseFirestore = (scope: FirestoreScope) => {
   if (FIRESTORE_MODE === 'all') return true;
   if (FIRESTORE_MODE === 'off') return false;
@@ -83,7 +92,9 @@ try {
       db.collection('settings').doc('connection_test').set({ 
         last_init: new Date().toISOString(),
         platform: 'server_admin_sdk'
-      }).catch(() => {});
+      }).catch((err: any) => {
+        console.error(`[Firestore] Connection test failed: ${err?.message || 'unknown error'}`);
+      });
     }
   } else {
     console.warn('[Firestore] firebase-applet-config.json not found. Using local filesystem fallback.');
@@ -110,6 +121,25 @@ const SETTINGS_DIR = path.join(process.cwd(), 'settings');
 [SKU_INDEX_DIR, HARVEST_DIR, OUTPUTS_DIR, SETTINGS_DIR].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
+
+// ── In-memory SKU index cache ─────────────────────────────────────────────
+// Loading master.json on every request is O(n) disk I/O. The cache avoids
+// repeated reads for the 30-second window of a typical view refresh.
+interface SkuIndexCache { data: any[]; loadedAt: number; }
+let _skuCache: SkuIndexCache | null = null;
+const SKU_CACHE_TTL_MS = 30_000; // 30 seconds
+
+function _invalidateSkuCache(): void { _skuCache = null; }
+
+function _getSkuCached(): any[] {
+  const now = Date.now();
+  if (_skuCache && now - _skuCache.loadedAt < SKU_CACHE_TTL_MS) return _skuCache.data;
+  const fp = path.join(SKU_INDEX_DIR, 'master.json');
+  const data = readJsonFile(fp, [] as any[]);
+  _skuCache = { data, loadedAt: now };
+  return data;
+}
+// ──────────────────────────────────────────────────────────────────────────
 
 const readJsonFile = <T>(filePath: string, fallback: T): T => {
   if (!fs.existsSync(filePath)) return fallback;
@@ -147,23 +177,143 @@ export const dbService = {
     if (db && canUseFirestore('sku')) {
       try {
         const docSnap = await db.collection('settings').doc('master_index').get();
-        if (docSnap.exists) return docSnap.data()?.data || [];
+        if (docSnap.exists) {
+          const data = docSnap.data()?.data || [];
+          if (data.length > 0) {
+            // Warm the local cache from Firestore so subsequent calls are fast
+            _skuCache = { data, loadedAt: Date.now() };
+            return data;
+          }
+        }
       } catch (e: any) {
         // Silently fallback
       }
     }
-    const fp = path.join(SKU_INDEX_DIR, 'master.json');
-    return readJsonFile(fp, [] as any[]);
+    return _getSkuCached();
   },
   async updateSkuIndex(data: any[]) {
+    _invalidateSkuCache();
     if (db && canUseFirestore('sku')) {
       try {
+        // Legacy single-doc write (compat for older reads)
         await db.collection('settings').doc('master_index').set({ data });
+        // Per-SKU document writes in batches of 500 (Firestore batch limit)
+        // This enables paginated queries on the 'skus' collection going forward.
+        for (let i = 0; i < data.length; i += 500) {
+          const batch = db.batch();
+          data.slice(i, i + 500).forEach((item: any) => {
+            const sku = (item.sku || item.SKU)?.toString();
+            if (sku) {
+              batch.set(db!.collection('skus').doc(sku), {
+                ...item,
+                _updatedAt: new Date().toISOString(),
+              });
+            }
+          });
+          await batch.commit();
+        }
       } catch (e: any) {
-        // ignore
+        console.warn('[Firestore] SKU index write failed, using file fallback:', e.message);
       }
     }
     fs.writeFileSync(path.join(SKU_INDEX_DIR, 'master.json'), JSON.stringify(data, null, 2));
+  },
+
+  /** O(1) single-SKU lookup. Uses per-doc Firestore collection or in-memory cache. */
+  async getSkuById(sku: string): Promise<any | null> {
+    if (db && canUseFirestore('sku')) {
+      try {
+        const docSnap = await db.collection('skus').doc(sku).get();
+        if (docSnap.exists) return docSnap.data() || null;
+      } catch { /* fallback */ }
+    }
+    const all = _getSkuCached();
+    return all.find((item: any) => (item.sku || item.SKU)?.toString() === sku) ?? null;
+  },
+
+  /**
+   * Paginated SKU listing. Backed by Firestore 'skus' collection (per-doc model)
+   * or the in-memory cache of master.json as fallback.
+   *
+   * For the Firestore path, `cursor` is the last document ID of the previous page.
+   * For the file/cache path, `cursor` is the last SKU value of the previous page.
+   */
+  async listSkusPaginated({ cursor, limit = 50, search, statusFilter }: {
+    cursor?: string;
+    limit?: number;
+    search?: string;
+    statusFilter?: string;
+  }): Promise<{ items: any[]; nextCursor: string | null; hasMore: boolean; total?: number }> {
+    const effectiveLimit = Math.min(limit || 50, 200);
+
+    // Firestore per-doc path (new model — available after first updateSkuIndex call)
+    if (db && canUseFirestore('sku')) {
+      try {
+        const skusRef = db.collection('skus');
+        // Check whether the new per-doc model has data
+        const probe = await skusRef.limit(1).get();
+        if (probe.size > 0) {
+          let q: FirebaseFirestore.Query = skusRef.orderBy('sku');
+          if (search) {
+            q = q.where('sku', '>=', search).where('sku', '<=', search + '\uf8ff');
+          }
+          if (cursor) {
+            const cursorDoc = await skusRef.doc(cursor).get();
+            if (cursorDoc.exists) q = q.startAfter(cursorDoc);
+          }
+          q = q.limit(effectiveLimit + 1); // +1 to detect hasMore
+          const snap = await q.get();
+          const docs = snap.docs.slice(0, effectiveLimit);
+          const hasMore = snap.docs.length > effectiveLimit;
+          return {
+            items: docs.map(d => d.data()),
+            nextCursor: hasMore && docs.length > 0 ? docs[docs.length - 1].id : null,
+            hasMore,
+          };
+        }
+      } catch { /* fallback to cache */ }
+    }
+
+    // File / cache fallback — sorts and slices in-memory
+    let all = _getSkuCached();
+    if (search) {
+      const s = search.toLowerCase();
+      all = all.filter((item: any) => {
+        const skuVal = ((item.sku || item.SKU) ?? '').toString().toLowerCase();
+        const title = ((item.title || item.Name) ?? '').toString().toLowerCase();
+        return skuVal.includes(s) || title.includes(s);
+      });
+    }
+    // Stable alphabetical sort so cursor positions are deterministic
+    all = [...all].sort((a: any, b: any) => {
+      const sa = (a.sku || a.SKU || '').toString();
+      const sb = (b.sku || b.SKU || '').toString();
+      return sa < sb ? -1 : sa > sb ? 1 : 0;
+    });
+
+    let startIndex = 0;
+    if (cursor) {
+      const idx = all.findIndex((item: any) => (item.sku || item.SKU)?.toString() === cursor);
+      if (idx >= 0) startIndex = idx + 1;
+    }
+    const page = all.slice(startIndex, startIndex + effectiveLimit);
+    const hasMore = startIndex + effectiveLimit < all.length;
+    const nextCursor =
+      hasMore && page.length > 0
+        ? (page[page.length - 1].sku || page[page.length - 1].SKU)?.toString() ?? null
+        : null;
+    return { items: page, nextCursor, hasMore, total: all.length };
+  },
+
+  /** Fast per-SKU harvest existence check. O(1). */
+  async harvestExists(sku: string): Promise<boolean> {
+    if (db && canUseFirestore('harvest')) {
+      try {
+        const docSnap = await db.collection('harvests').doc(sku).get();
+        return docSnap.exists;
+      } catch { /* fallback */ }
+    }
+    return fs.existsSync(path.join(HARVEST_DIR, `${sku}.md`));
   },
 
   // Harvests
@@ -271,9 +421,16 @@ export const dbService = {
     if (fs.existsSync(fp)) fs.unlinkSync(fp);
   },
   async listOutputs() {
-    const files = fs.readdirSync(OUTPUTS_DIR).filter(f => f.endsWith('.json'));
+    const files = fs.readdirSync(OUTPUTS_DIR).filter(f => f.endsWith('.json') && !f.includes('/'));
     if (files.length > 0) {
-      return files.map(f => JSON.parse(fs.readFileSync(path.join(OUTPUTS_DIR, f), 'utf8')));
+      // Sequential reads to avoid holding hundreds of file buffers in memory simultaneously
+      const results: any[] = [];
+      for (const f of files) {
+        try {
+          results.push(JSON.parse(fs.readFileSync(path.join(OUTPUTS_DIR, f), 'utf8')));
+        } catch { /* skip malformed */ }
+      }
+      return results;
     }
     if (db && canUseFirestore('outputs')) {
       try {
@@ -287,6 +444,65 @@ export const dbService = {
       }
     }
     return [];
+  },
+
+  /**
+   * Paginated output listing. Use instead of listOutputs() for large datasets
+   * — avoids loading all output files into memory at once.
+   */
+  async listOutputsPaginated({ cursor, limit = 50 }: {
+    cursor?: string;
+    limit?: number;
+  }): Promise<{ items: any[]; nextCursor: string | null; hasMore: boolean }> {
+    const effectiveLimit = Math.min(limit || 50, 200);
+
+    if (db && canUseFirestore('outputs')) {
+      try {
+        let q: FirebaseFirestore.Query = db.collection('outputs').orderBy('sku');
+        if (cursor) {
+          const cursorDoc = await db.collection('outputs').doc(cursor).get();
+          if (cursorDoc.exists) q = q.startAfter(cursorDoc);
+        }
+        q = q.limit(effectiveLimit + 1);
+        const snap = await q.get();
+        if (snap.size > 0) {
+          const docs = snap.docs.slice(0, effectiveLimit);
+          const hasMore = snap.docs.length > effectiveLimit;
+          return {
+            items: docs.map(d => { const val = d.data(); return val.data ? val.data : val; }),
+            nextCursor: hasMore && docs.length > 0 ? docs[docs.length - 1].id : null,
+            hasMore,
+          };
+        }
+      } catch { /* fallback */ }
+    }
+
+    // File fallback — sequential reads of sorted files
+    const files = fs.readdirSync(OUTPUTS_DIR)
+      .filter(f => f.endsWith('.json') && !f.includes('/'))
+      .sort();
+
+    let startIndex = 0;
+    if (cursor) {
+      const idx = files.findIndex(f => f.replace('.json', '') === cursor);
+      if (idx >= 0) startIndex = idx + 1;
+    }
+    const pageFiles = files.slice(startIndex, startIndex + effectiveLimit);
+    const hasMore = startIndex + effectiveLimit < files.length;
+    const items: any[] = [];
+    for (const f of pageFiles) {
+      try {
+        items.push(JSON.parse(fs.readFileSync(path.join(OUTPUTS_DIR, f), 'utf8')));
+      } catch { /* skip */ }
+    }
+    return {
+      items,
+      nextCursor:
+        hasMore && pageFiles.length > 0
+          ? pageFiles[pageFiles.length - 1].replace('.json', '')
+          : null,
+      hasMore,
+    };
   },
 
   // Settings

@@ -1,19 +1,40 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
+import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
-import dns from "node:dns/promises";
-import net from "node:net";
 import * as cheerio from "cheerio";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import multer from "multer";
 import { createRequire } from "module";
+
+// Load environment variables from .env file (must be before any usage)
+dotenv.config();
+
 const __require = createRequire(import.meta.url);
 const pdfParse = __require("pdf-parse");
 import Groq from "groq-sdk";
 import TurndownService from "turndown";
-import { launch } from "cloakbrowser";
-import { chromium as playwrightChromium } from "playwright";
+import { z } from "zod";
+import { BusyError, HttpError } from "./src/server/errors.js";
+import { isPrivateIpAddress, assertSafeTargetUrl } from "./src/server/ssrf.js";
+import {
+  getBrowser,
+  withBrowserTask,
+  closeBrowser,
+  type BrowserLike,
+} from "./src/server/browser.js";
+import { jobQueue } from "./src/server/queue.js";
+import type { AsyncJobType } from "./src/server/queue.js";
+import {
+  ScrapeRequestSchema,
+  DiscoverRequestSchema,
+  AnalyzeRequestSchema,
+  ImageExtractRequestSchema,
+  SKUIndexRequestSchema,
+  SettingsRequestSchema,
+} from "./src/server/schemas.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -38,142 +59,33 @@ const IMAGES_DIR = path.join(process.cwd(), 'public', 'images');
   }
 });
 
-type BrowserLike = any;
-
-let browser: BrowserLike | null = null;
-let browserEngine: 'cloakbrowser' | 'playwright' | null = null;
-let activeBrowserTasks = 0;
-const MAX_CONCURRENT_BROWSER_TASKS = Number(process.env.MAX_CONCURRENT_BROWSER_TASKS || 2);
-
-class BusyError extends Error {
-  statusCode: number;
-  constructor(message: string) {
-    super(message);
-    this.statusCode = 503;
-  }
+// Proper TypeScript: Type definitions for key interfaces (eliminate 'any' where possible)
+interface ScrapeTargetData {
+  url: string;
+  selector?: string;
+  extractWithGroq?: boolean;
+  enableScreenshot?: boolean;
+  strategy?: 'default' | 'GroqExtractionStrategy' | 'JsonLdExtractionStrategy' | 'WholeCaptureStrategy';
+  deepScroll?: boolean;
 }
 
-class HttpError extends Error {
-  statusCode: number;
-  constructor(statusCode: number, message: string) {
-    super(message);
-    this.statusCode = statusCode;
-  }
+interface ScrapeResult {
+  markdown: string;
+  groqResult?: string | null;
+  imageUrls: string[];
+  screenshotBase64?: string | null;
+  pageTitle: string | null;
+  url: string;
 }
+
+// Keep flexible typing due to CloakBrowser/Playwright incompatibilities
+// In production, keep 'any' for browser objects. Strong typing elsewhere.
+// BrowserLike, BusyError, HttpError, getBrowser, withBrowserTask are imported from src/server/
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const randomDelay = (min: number, max: number) => delay(Math.floor(Math.random() * (max - min + 1) + min));
 
-const isPrivateIpAddress = (host: string): boolean => {
-  const ipVersion = net.isIP(host);
-  if (ipVersion === 4) {
-    const parts = host.split('.').map(Number);
-    const [a, b] = parts;
-    if (a === 10) return true;
-    if (a === 127) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 0) return true;
-    return false;
-  }
-
-  if (ipVersion === 6) {
-    const normalized = host.toLowerCase();
-    if (normalized === '::1') return true;
-    if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
-    if (normalized.startsWith('fe80')) return true;
-    return false;
-  }
-
-  return false;
-};
-
-const assertSafeTargetUrl = async (inputUrl: string) => {
-  const parsed = new URL(inputUrl);
-  if (!['http:', 'https:'].includes(parsed.protocol)) {
-    throw new Error('Only http/https URLs are allowed');
-  }
-
-  const host = parsed.hostname.toLowerCase();
-  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
-    throw new Error('Localhost targets are not allowed');
-  }
-
-  if (net.isIP(host) && isPrivateIpAddress(host)) {
-    throw new Error('Private network targets are not allowed');
-  }
-
-  try {
-    const records = await dns.lookup(host, { all: true });
-    if (records.some((record) => isPrivateIpAddress(record.address))) {
-      throw new Error('Resolved target points to a private network address');
-    }
-  } catch (e: any) {
-    if (e?.message?.includes('private network')) {
-      throw e;
-    }
-    console.warn(`[SERVER] DNS lookup warning for ${host}: ${e?.message || 'lookup failed'}`);
-  }
-};
-
-const withBrowserTask = async <T>(task: () => Promise<T>) => {
-  if (activeBrowserTasks >= MAX_CONCURRENT_BROWSER_TASKS) {
-    throw new BusyError('Server is busy. Please retry in a moment.');
-  }
-
-  activeBrowserTasks += 1;
-  try {
-    return await task();
-  } finally {
-    activeBrowserTasks = Math.max(0, activeBrowserTasks - 1);
-  }
-};
-
-async function getBrowser() {
-  if (browser && !browser.isConnected()) {
-    console.log(`[SERVER] ${browserEngine || 'browser'} instance disconnected, cleaning up...`);
-    try {
-      await browser.close();
-    } catch (e) {}
-    browser = null;
-    browserEngine = null;
-  }
-
-  if (!browser) {
-    const launchArgs = [
-      "--disable-http2", // Fix for ERR_HTTP2_PROTOCOL_ERROR on sites like Noon
-      "--window-size=1920,1080",
-      "--disable-extensions",
-      "--mute-audio"
-    ];
-
-    try {
-      console.log("[SERVER] Launching CloakBrowser stealth Chromium...");
-      browser = await launch({
-        headless: true,
-        args: launchArgs
-      });
-      browserEngine = 'cloakbrowser';
-      console.log("[SERVER] Browser engine active: CloakBrowser");
-    } catch (cloakErr: any) {
-      console.warn(`[SERVER] CloakBrowser launch failed: ${cloakErr?.message || 'unknown error'}`);
-      console.warn("[SERVER] Falling back to stock Playwright Chromium...");
-      browser = await playwrightChromium.launch({
-        headless: true,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-blink-features=AutomationControlled",
-          ...launchArgs
-        ]
-      });
-      browserEngine = 'playwright';
-      console.log("[SERVER] Browser engine active: Playwright fallback");
-    }
-  }
-  return browser;
-}
+// isPrivateIpAddress and assertSafeTargetUrl imported from src/server/ssrf.ts
 
 // Global Uncaught Exception Handlers to prevent server crash
 process.on('unhandledRejection', (reason, promise) => {
@@ -211,14 +123,31 @@ const buildGroqClient = (apiKey?: string | null) => {
 
 const groq = buildGroqClient(process.env.GROQ_API_KEY);
 
+// All Zod schemas are imported from src/server/schemas.ts
+
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
   const ADMIN_KEY = (process.env.ADMIN_KEY || '').trim();
+  
+  // Validate ADMIN_KEY is set (CRITICAL: Required for API security)
+  if (!ADMIN_KEY) {
+    console.error('[SERVER] FATAL: ADMIN_KEY environment variable is not set. This is required for API security.');
+    console.error('[SERVER] Please set ADMIN_KEY before starting the server.');
+    process.exit(1);
+  }
+  
+  console.log('[SERVER] ✓ ADMIN_KEY loaded successfully. Length:', ADMIN_KEY.length);
+  
   const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
     .split(',')
     .map((v) => v.trim())
     .filter(Boolean);
+  const ALLOW_ALL_CORS = CORS_ORIGINS.includes('*');
+
+  if (process.env.NODE_ENV === 'production' && CORS_ORIGINS.length === 0) {
+    console.warn('[SERVER] CORS_ORIGINS is empty in production. Only same-origin/non-browser requests are expected to work.');
+  }
 
   app.disable('x-powered-by');
 
@@ -230,7 +159,32 @@ async function startServer() {
     next();
   });
 
+  // Request ID middleware for better tracing and debugging (Medium priority)
+  app.use((req, res, next) => {
+    const requestId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    (req as any).id = requestId;
+    res.setHeader('X-Request-ID', requestId);
+    next();
+  });
+
   const rateState = new Map<string, { count: number; windowStart: number }>();
+  
+  // Cleanup old rate limit entries every minute (prevents memory leak)
+  setInterval(() => {
+    const now = Date.now();
+    const windowMs = 60_000;
+    let cleaned = 0;
+    for (const [ip, state] of rateState.entries()) {
+      if (now - state.windowStart > windowMs) {
+        rateState.delete(ip);
+        cleaned++;
+      }
+    }
+    if (cleaned > 0) {
+      console.log(`[SERVER] Rate limit cleanup: removed ${cleaned} stale entries`);
+    }
+  }, 60_000);
+
   app.use('/api', (req, res, next) => {
     const ip = req.ip || req.socket.remoteAddress || 'unknown';
     const now = Date.now();
@@ -253,6 +207,7 @@ async function startServer() {
   app.use(cors({
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
+      if (ALLOW_ALL_CORS) return callback(null, true);
       if (process.env.NODE_ENV !== 'production' && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) {
         return callback(null, true);
       }
@@ -262,8 +217,41 @@ async function startServer() {
       return callback(new Error('Origin not allowed by CORS'));
     },
     methods: ['GET', 'POST', 'DELETE'],
-    credentials: false
+    credentials: true
   }));
+
+  // Parse cookies for authentication (httpOnly cookies cannot be accessed from JS)
+  app.use(cookieParser());
+
+  // Authentication middleware for protected API endpoints (CRITICAL SECURITY)
+  const requireAdminAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    // Check for admin token in httpOnly cookie (httpOnly cookies cannot be accessed from JS)
+    const adminToken = req.cookies?.admin_token || req.headers['x-admin-key'];
+    if (typeof adminToken !== 'string' || adminToken !== ADMIN_KEY) {
+      console.warn(`[SERVER] Unauthorized API access attempt on ${req.method} ${req.path} from ${req.ip}`);
+      return res.status(403).json({ error: 'Unauthorized. Admin key required.' });
+    }
+    next();
+  };
+
+  // Validation middleware factory (Security: Validates all input)
+  const validateRequest = <T>(schema: z.ZodSchema<T>) => {
+    return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      try {
+        schema.parse(req.body);
+        next();
+      } catch (error) {
+        if (error instanceof z.ZodError) {
+          console.warn(`[SERVER] Validation error on ${req.path}:`, error.errors);
+          return res.status(400).json({ 
+            error: 'Invalid request', 
+            details: error.errors[0]?.message 
+          });
+        }
+        next();
+      }
+    };
+  };
 
   app.use((req, res, next) => {
     res.setTimeout(120_000, () => {
@@ -279,11 +267,183 @@ async function startServer() {
 
   const upload = multer({ storage: multer.memoryStorage() });
 
-  app.post("/api/upload-pdf", upload.single("file"), async (req, res) => {
+  // ── Queue handler registrations ────────────────────────────────────────────
+  // These closures capture the helper functions declared later in startServer
+  // (scrapeTarget, performInspection, loadSettings, resolveGroqClient) — all
+  // `async function` declarations so they are hoisted within startServer scope.
+  jobQueue.registerHandler('scrape' as AsyncJobType, async (payload) => {
+    const { url, selector, extractWithGroq, enableScreenshot, strategy, deepScroll } =
+      payload as unknown as ScrapeTargetData;
+    return await scrapeTarget({ url, selector, extractWithGroq, enableScreenshot, strategy, deepScroll });
+  });
+
+  jobQueue.registerHandler('inspect' as AsyncJobType, async (payload) => {
+    const { url, deepScroll } = payload as { url: string; deepScroll?: boolean };
+    return await performInspection(url, deepScroll ?? false);
+  });
+
+  jobQueue.registerHandler('discover' as AsyncJobType, async (payload) => {
+    const { url, linkSelector } = payload as { url: string; linkSelector?: string };
+    let context: any = null;
+    try {
+      console.log(`[SERVER] Discovery Mode Starting: ${url}`);
+      const browserInstance = await getBrowser();
+      context = await browserInstance.newContext();
+      const page = await context.newPage();
+      try {
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      } catch (e) {
+        const navWarn = e as Error;
+        console.warn(`[SERVER] Discovery navigation warning: ${navWarn.message}`);
+      }
+      await page.waitForTimeout(1500);
+      const pageLinks = (await page.evaluate(`
+        (() => {
+          const selector = ${linkSelector ? JSON.stringify(linkSelector) : 'null'};
+          let elements = selector ? Array.from(document.querySelectorAll(selector)) : Array.from(document.querySelectorAll('a[href]'));
+          if (selector && !selector.includes('a')) {
+             const container = document.querySelector(selector);
+             if (container) elements = Array.from(container.querySelectorAll('a[href]'));
+          }
+          return elements
+            .map(el => { const href = el.href; const text = el.innerText.trim(); return { href, text }; })
+            .filter(link => link.href && (link.href.startsWith('http') || link.href.startsWith('/')));
+        })()
+      `)) as any[];
+      await context.close();
+      context = null;
+      return pageLinks;
+    } catch (err) {
+      if (context) { try { await context.close(); } catch { /* ignore */ } }
+      throw err;
+    }
+  });
+
+  jobQueue.registerHandler('run_job' as AsyncJobType, async (payload) => {
+    const { sku, attributeSetName: uiAttributeSetName, aiModel } = payload as {
+      sku: string;
+      attributeSetName?: string;
+      aiModel?: string;
+    };
+    const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
+    const harvestPath = path.join(HARVEST_DIR, `${safeSku}.md`);
+
+    // O(1) single-SKU lookup using the new per-doc model / cache
+    const skuRecord = await dbService.getSkuById(sku.toString());
+
+    if (!fs.existsSync(harvestPath) && !skuRecord?.pdf_text && !skuRecord?.sap_data && !skuRecord) {
+      throw new Error(`Missing source data or SKU record for ${sku}`);
+    }
+
+    let markdown = '';
+    if (fs.existsSync(harvestPath)) {
+      markdown = fs.readFileSync(harvestPath, 'utf-8');
+    }
+    let secondaryMarkdown = '';
+    const secondaryHarvestPath = path.join(HARVEST_DIR, `${safeSku}_secondary.md`);
+    if (fs.existsSync(secondaryHarvestPath)) {
+      secondaryMarkdown = fs.readFileSync(secondaryHarvestPath, 'utf-8');
+    }
+
+    const settings = await loadSettings();
+    const attributeSetName = (
+      uiAttributeSetName ||
+      skuRecord?.attribute_set ||
+      skuRecord?.attribute_set_name ||
+      skuRecord?.Attribute_Set ||
+      skuRecord?.schema ||
+      skuRecord?.Schema ||
+      ''
+    ).toString().trim();
+
+    let headers = Object.keys(skuRecord || {}).filter(k =>
+      k.toLowerCase() !== 'attribute_set' &&
+      k.toLowerCase() !== 'attribute_set_name' &&
+      k.toLowerCase() !== 'schema'
+    );
+    if (!headers.some(k => k.toLowerCase() === 'sku')) headers.unshift('SKU');
+
+    let mdRules = '';
+    if (attributeSetName) {
+      const foundSet = settings.attributeSets.find(
+        (s: any) => s.name.toLowerCase() === attributeSetName.toLowerCase()
+      );
+      if (foundSet) {
+        if (foundSet.fields?.length > 0) headers = foundSet.fields;
+        if (foundSet.mdRules) mdRules = `\nSPECIFIC MAPPING RULES (APPLY THESE STRICTLY): \n${foundSet.mdRules}\n`;
+      }
+    } else if (settings.attributeSets?.length === 1) {
+      const foundSet = settings.attributeSets[0];
+      if (foundSet.fields?.length > 0) headers = foundSet.fields;
+      if (foundSet.mdRules) mdRules = `\nSPECIFIC MAPPING RULES (APPLY THESE STRICTLY): \n${foundSet.mdRules}\n`;
+    }
+
+    const groqClient = await resolveGroqClient(settings);
+    if (!groqClient) throw new Error('Groq API Key is not configured. Please add it in Connectivity settings.');
+
+    const prompt = `
+      TASK: High-Precision Product Specification Mapping
+      SKU: ${sku}
+      TARGET ATTRIBUTE SET: ${attributeSetName || 'DEFAULT_GENERAL'}
+      
+      DIRECTIONS:
+      1. Analyze the provided context (SAP Data, PDF and Web Scrapes) for the given SKU.
+      2. Map the relevant data points into the following headers:
+         ${headers.join(', ')}
+      3. Ensure compliance with these specific schema mapping rules:
+         ${mdRules}
+
+      CONTEXT 1 (SAP DATA):
+      ${skuRecord?.sap_data ? skuRecord.sap_data : 'No SAP data attached.'}
+
+      CONTEXT 2 (PDF Document):
+      ${skuRecord?.pdf_text ? skuRecord.pdf_text : 'No PDF attached.'}
+
+      CONTEXT 3 (Scraped Web Data):
+      ${markdown ? `Primary URL Scrape:\n${markdown}` : 'No Primary URL scraped data.'}
+      ${secondaryMarkdown ? `\nSecondary URL Scrape:\n${secondaryMarkdown}` : ''}
+
+      OUTPUT FORMAT: Return a valid JSON object where keys EXACTLY match the headers above.
+    `;
+
+    const groqResponse = await groqClient.chat.completions.create({
+      messages: [{ role: 'user', content: prompt }],
+      model: (aiModel as string) || 'llama-3.3-70b-versatile',
+      response_format: { type: 'json_object' },
+    });
+    const outputData = JSON.parse(groqResponse.choices[0]?.message?.content || '{}');
+
+    const manualOverrides: any = {};
+    if (skuRecord) {
+      if (skuRecord.shipping_weight) manualOverrides['attributes__shipping_weight'] = skuRecord.shipping_weight;
+      if (skuRecord.brand) manualOverrides['attributes__brand'] = skuRecord.brand;
+      if (skuRecord.ean) manualOverrides['attributes__lulu_ean'] = skuRecord.ean;
+      if (skuRecord.base_code) manualOverrides['base code'] = skuRecord.base_code;
+      if (skuRecord.product_type) manualOverrides['attributes__lulu_product_type'] = skuRecord.product_type;
+    }
+    const finalOutput = { ...outputData, ...manualOverrides, SKU: sku, sku };
+    await dbService.saveOutput(safeSku, finalOutput);
+    return finalOutput;
+  });
+  // ── End queue handler registrations ───────────────────────────────────────
+
+  app.post("/api/upload-pdf", upload.single("file"), requireAdminAuth, async (req, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({ error: "No file uploaded" });
       }
+      
+      // File type validation (Security)
+      if (!req.file.mimetype.includes('pdf')) {
+        return res.status(400).json({ error: "Only PDF files are allowed" });
+      }
+      
+      // File size validation (Security: Max 50MB, configurable)
+      const MAX_PDF_SIZE = 50 * 1024 * 1024; // 50MB
+      if (req.file.size > MAX_PDF_SIZE) {
+        return res.status(413).json({ error: `PDF file too large. Maximum size: 50MB (got ${(req.file.size / 1024 / 1024).toFixed(2)}MB)` });
+      }
+      
       const data = await pdfParse(req.file.buffer);
       if (!data || !data.text) {
         return res.status(400).json({ error: "Failed to extract text from PDF" });
@@ -311,7 +471,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/sku/index", async (req, res) => {
+  app.post("/api/sku/index", requireAdminAuth, validateRequest(SKUIndexRequestSchema), async (req, res) => {
     const { data } = req.body;
     if (!data || !Array.isArray(data)) {
       return res.status(400).json({ error: "Invalid data format" });
@@ -338,7 +498,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/sku/index/:sku", async (req, res) => {
+  app.delete("/api/sku/index/:sku", requireAdminAuth, async (req, res) => {
     try {
       const { sku } = req.params;
       const data = await dbService.getSkuIndex();
@@ -350,7 +510,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/sku/index", async (req, res) => {
+  app.get("/api/sku/index", requireAdminAuth, async (req, res) => {
     try {
       const data = await dbService.getSkuIndex();
       res.json(data);
@@ -359,7 +519,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/harvest", async (req, res) => {
+  app.get("/api/harvest", requireAdminAuth, async (req, res) => {
     try {
       const fileData = await dbService.listHarvests();
       res.json(fileData);
@@ -368,7 +528,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/harvest/:filename", async (req, res) => {
+  app.get("/api/harvest/:filename", requireAdminAuth, async (req, res) => {
     try {
       const { filename } = req.params;
       const sku = filename.replace('.md', '');
@@ -383,7 +543,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/harvest/:filename", async (req, res) => {
+  app.delete("/api/harvest/:filename", requireAdminAuth, async (req, res) => {
     try {
       const { filename } = req.params;
       const sku = filename.replace('.md', '');
@@ -394,7 +554,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/save-batch", async (req, res) => {
+  app.post("/api/save-batch", requireAdminAuth, async (req, res) => {
     const { sku, content } = req.body;
     if (!sku || !content) {
       return res.status(400).json({ error: "SKU and content are required" });
@@ -412,7 +572,7 @@ async function startServer() {
     }
   });
 
-  async function scrapeTarget(targetData: any) {
+  async function scrapeTarget(targetData: ScrapeTargetData): Promise<ScrapeResult> {
     let { url, selector, extractWithGroq, enableScreenshot, strategy, deepScroll } = targetData;
     
     // Ensure URL has a valid scheme
@@ -420,6 +580,7 @@ async function startServer() {
       url = 'https://' + url;
     }
     
+    // Context can be either CloakBrowser or Playwright context - keep flexible typing
     let context: any = null;
     try {
       console.log(`[SERVER] Multi-Stage Extraction Starting: ${url} (Strategy: ${strategy || 'default'}, Screenshot: ${enableScreenshot}, Scroll: ${deepScroll})`);
@@ -827,7 +988,7 @@ async function startServer() {
   }
 
   // API Route for scraping and optional Groq extraction
-  app.post("/api/scrape", async (req, res) => {
+  app.post("/api/scrape", requireAdminAuth, validateRequest(ScrapeRequestSchema), async (req, res) => {
     let { url, selector, extractWithGroq, enableScreenshot, sku, strategy, deepScroll, secondaryTarget } = req.body;
 
     if (!url) {
@@ -838,19 +999,28 @@ async function startServer() {
       try { new URL(sanitizeUrl(url)); } catch (e) { return res.status(400).json({ error: "Invalid URL format" }); }
       await assertSafeTargetUrl(sanitizeUrl(url));
 
-      const primaryResult = await withBrowserTask(() => scrapeTarget({ url: sanitizeUrl(url), selector, extractWithGroq, enableScreenshot, strategy, deepScroll }));
+      const primaryJob = jobQueue.enqueue('scrape', { url: sanitizeUrl(url), selector, extractWithGroq, enableScreenshot, strategy, deepScroll });
+      const completedPrimary = await jobQueue.waitForJob(primaryJob.id, 90_000);
+      if (completedPrimary.status !== 'completed') {
+        throw Object.assign(new Error(completedPrimary.error || 'Scrape failed'), { statusCode: 500 });
+      }
+      const primaryResult = completedPrimary.result as ScrapeResult;
       let secondaryResult = null;
-      
+
       if (secondaryTarget && secondaryTarget.url) {
         await assertSafeTargetUrl(sanitizeUrl(secondaryTarget.url));
-        secondaryResult = await withBrowserTask(() => scrapeTarget({
+        const secondaryJob = jobQueue.enqueue('scrape', {
           url: sanitizeUrl(secondaryTarget.url),
           selector: secondaryTarget.selector || selector,
           strategy: secondaryTarget.strategy || strategy,
           extractWithGroq,
-          enableScreenshot: enableScreenshot,
-          deepScroll: deepScroll
-        }));
+          enableScreenshot,
+          deepScroll,
+        });
+        const completedSecondary = await jobQueue.waitForJob(secondaryJob.id, 90_000);
+        if (completedSecondary.status === 'completed') {
+          secondaryResult = completedSecondary.result as ScrapeResult;
+        }
       }
 
       if (sku) {
@@ -891,7 +1061,7 @@ async function startServer() {
   });
 
   // API Route for Discovery Mode (Deep Crawl)
-  app.post("/api/discover", async (req, res) => {
+  app.post("/api/discover", requireAdminAuth, validateRequest(DiscoverRequestSchema), async (req, res) => {
     let { url, linkSelector } = req.body;
     if (!url) return res.status(400).json({ error: "URL is required" });
     
@@ -901,44 +1071,12 @@ async function startServer() {
 
     let context: any = null;
     try {
-      const links = await withBrowserTask(async () => {
-        console.log(`[SERVER] Discovery Mode Starting: ${url}`);
-        const browserInstance = await getBrowser();
-        context = await browserInstance.newContext();
-        const page = await context.newPage();
-        
-        try {
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        } catch (e) {
-          const navWarn = e as Error;
-          console.warn(`[SERVER] Discovery navigation warning: ${navWarn.message}`);
-        }
-
-        await page.waitForTimeout(1500);
-        
-        const pageLinks = (await page.evaluate(`
-        (() => {
-          const selector = ${linkSelector ? JSON.stringify(linkSelector) : 'null'};
-          let elements = selector ? Array.from(document.querySelectorAll(selector)) : Array.from(document.querySelectorAll('a[href]'));
-          // If they provided a container selector, search inside it
-          if (selector && !selector.includes('a')) {
-             const container = document.querySelector(selector);
-             if (container) elements = Array.from(container.querySelectorAll('a[href]'));
-          }
-
-          return elements
-            .map(el => {
-              const href = el.href;
-              const text = el.innerText.trim();
-              return { href, text };
-            })
-            .filter(link => link.href && (link.href.startsWith('http') || link.href.startsWith('/')));
-        })()
-      `)) as any[];
-        await context.close();
-        context = null;
-        return pageLinks;
-      });
+      const discoverJob = jobQueue.enqueue('discover', { url, linkSelector });
+      const completedDiscover = await jobQueue.waitForJob(discoverJob.id, 60_000);
+      if (completedDiscover.status !== 'completed') {
+        throw Object.assign(new Error(completedDiscover.error || 'Discovery failed'), { statusCode: 500 });
+      }
+      const links = completedDiscover.result as any[];
 
       // Normalize links
       const urlObj = new URL(url);
@@ -1076,7 +1214,7 @@ async function startServer() {
 }
 
 
-  app.post("/api/inspect", async (req, res) => {
+  app.post("/api/inspect", requireAdminAuth, async (req, res) => {
     try {
         let url = req.body.url;
         if (!url) return res.status(400).json({ error: "URL is required" });
@@ -1084,20 +1222,30 @@ async function startServer() {
         try { new URL(url); } catch(e) { return res.status(400).json({ error: "Invalid URL format" }); }
         await assertSafeTargetUrl(url);
         
-        res.json(await withBrowserTask(() => performInspection(url, req.body.deepScroll)));
+        const inspectJob = jobQueue.enqueue('inspect', { url, deepScroll: req.body.deepScroll });
+        const completedInspect = await jobQueue.waitForJob(inspectJob.id, 90_000);
+        if (completedInspect.status !== 'completed') {
+          throw Object.assign(new Error(completedInspect.error || 'Inspection failed'), { statusCode: 500 });
+        }
+        res.json(completedInspect.result);
     } catch (error: any) {
         res.status(error?.statusCode || 500).json({ error: "Inspection failed", details: error.message });
     }
   });
 
-  app.post("/api/analyze", async (req, res) => {
+  app.post("/api/analyze", requireAdminAuth, validateRequest(AnalyzeRequestSchema), async (req, res) => {
     const { url, deepScroll } = req.body;
     try {
         if (!url) return res.status(400).json({ error: "URL is required" });
         const safeUrl = sanitizeUrl(url);
         try { new URL(safeUrl); } catch(e) { return res.status(400).json({ error: "Invalid URL format" }); }
         await assertSafeTargetUrl(safeUrl);
-        const data = await withBrowserTask(() => performInspection(safeUrl, deepScroll));
+        const analyzeJob = jobQueue.enqueue('inspect', { url: safeUrl, deepScroll });
+        const completedAnalyze = await jobQueue.waitForJob(analyzeJob.id, 90_000);
+        if (completedAnalyze.status !== 'completed') {
+          throw Object.assign(new Error(completedAnalyze.error || 'Inspection failed'), { statusCode: 500 });
+        }
+        const data = completedAnalyze.result as Awaited<ReturnType<typeof performInspection>>;
         
         const prompt = `
             You are a Web Scraping Expert. Analyze the following DOM structure and metadata from a product page.
@@ -1144,7 +1292,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/pdf/:sku", async (req, res) => {
+  app.get("/api/pdf/:sku", requireAdminAuth, async (req, res) => {
     try {
       const idx = await dbService.getSkuIndex();
       const record = idx.find((r: any) => (r.sku || r.SKU)?.toString() === req.params.sku.toString());
@@ -1157,170 +1305,79 @@ async function startServer() {
     }
   });
 
-  app.get("/api/jobs", async (req, res) => {
+  app.get("/api/jobs", requireAdminAuth, async (req, res) => {
     try {
-      const skus = await dbService.getSkuIndex();
-      const harvests = (await dbService.listHarvests()).map(h => h.name);
-      
-      const jobs = await Promise.all(skus.map(async (product: any) => {
-        // Find matching SKU in filenames (allowing for some fuzzy underscore match)
-        const safeSku = product.sku.toString().replace(/[^a-z0-9_-]/gi, '_');
-        const hasHarvest = harvests.includes(`${safeSku}.md`);
+      const cursor = req.query.cursor as string | undefined;
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const search = req.query.search as string | undefined;
+
+      const { items: skus, nextCursor, hasMore, total } = await dbService.listSkusPaginated({
+        cursor,
+        limit,
+        search,
+      });
+
+      // Per-item status checks bounded to the current page — O(page_size) not O(n)
+      const jobs = (await Promise.all(skus.map(async (product: any) => {
+        const rawSku = (product.sku || product.SKU || '').toString();
+        if (!rawSku) return null;
+        const safeSku = rawSku.replace(/[^a-z0-9_-]/gi, '_');
         const hasPdf = !!product.pdf_text;
         const hasSapData = !!product.sap_data;
-        
-        // Check if output already exists (terminal state)
-        const output = await dbService.getOutput(safeSku);
+
+        const [hasHarvest, output] = await Promise.all([
+          dbService.harvestExists(safeSku),
+          dbService.getOutput(safeSku),
+        ]);
         const outputExists = !!output;
-        
+
         return {
           ...product,
-          status: outputExists ? 'completed' : ((hasHarvest || hasPdf || hasSapData) ? 'ready' : 'pending'),
+          status: outputExists
+            ? 'completed'
+            : (hasHarvest || hasPdf || hasSapData ? 'ready' : 'pending'),
           harvestFile: hasHarvest ? `${safeSku}.md` : null,
-          hasPdf: hasPdf,
-          hasSapData: hasSapData
+          hasPdf,
+          hasSapData,
         };
-      }));
-      
-      res.json(jobs);
+      }))).filter(Boolean);
+
+      res.json({ items: jobs, nextCursor, hasMore, total });
     } catch (e) {
       res.json([]);
     }
   });
 
-  app.post("/api/jobs/run", async (req, res) => {
-    const { sku, attributeSetName: uiAttributeSetName, aiModel } = req.body;
+  app.post("/api/jobs/run", requireAdminAuth, async (req, res) => {
+    const { sku, attributeSetName, aiModel } = req.body;
     if (!sku) return res.status(400).json({ error: "SKU required" });
-
     try {
-      const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
-      const harvestPath = path.join(HARVEST_DIR, `${safeSku}.md`);
-      const skuIndexData = await dbService.getSkuIndex();
-      const skuRecord = skuIndexData.find((p: any) => (p.sku || p.SKU)?.toString() === sku.toString());
-
-      if (!fs.existsSync(harvestPath) && !skuRecord?.pdf_text && !skuRecord?.sap_data && !skuRecord) {
-        return res.status(404).json({ error: `Missing source data or SKU record for ${sku}` });
-      }
-
-      let markdown = '';
-      if (fs.existsSync(harvestPath)) {
-        markdown = fs.readFileSync(harvestPath, 'utf-8');
-      }
-      
-      let secondaryMarkdown = '';
-      const secondaryHarvestPath = path.join(HARVEST_DIR, `${safeSku}_secondary.md`);
-      if (fs.existsSync(secondaryHarvestPath)) {
-        secondaryMarkdown = fs.readFileSync(secondaryHarvestPath, 'utf-8');
-      }
-
-      const settings = await loadSettings();
-      
-      // Determine attribute set name from UI, fallback to SKU record
-      const attributeSetName = (uiAttributeSetName || skuRecord.attribute_set || skuRecord.attribute_set_name || skuRecord.Attribute_Set || skuRecord.schema || skuRecord.Schema || '').toString().trim();
-      
-      // Default fallback: use all headers uploaded in the Excel file for this SKU
-      let headers = Object.keys(skuRecord).filter(k => 
-         k.toLowerCase() !== 'attribute_set' && 
-         k.toLowerCase() !== 'attribute_set_name' &&
-         k.toLowerCase() !== 'schema'
-      );
-      if (!headers.some(k => k.toLowerCase() === 'sku')) {
-         headers.unshift('SKU');
-      }
-
-      let mdRules = '';
-
-      if (attributeSetName) {
-        const foundSet = settings.attributeSets.find((s: any) => s.name.toLowerCase() === attributeSetName.toLowerCase());
-        if (foundSet) {
-          if (foundSet.fields && foundSet.fields.length > 0) {
-            headers = foundSet.fields;
-          }
-          if (foundSet.mdRules) {
-            mdRules = `\nSPECIFIC MAPPING RULES (APPLY THESE STRICTLY): \n${foundSet.mdRules}\n`;
-          }
-        }
-      } else if (settings.attributeSets && settings.attributeSets.length === 1) {
-        // Fallback: If no schema is specified in the SKU record but there's exactly one schema in the Hub, use it
-        const foundSet = settings.attributeSets[0];
-        if (foundSet.fields && foundSet.fields.length > 0) {
-           headers = foundSet.fields;
-        }
-        if (foundSet.mdRules) {
-           mdRules = `\nSPECIFIC MAPPING RULES (APPLY THESE STRICTLY): \n${foundSet.mdRules}\n`;
-        }
-      }
-      
-      let outputData = null;
-      const groqClient = await resolveGroqClient(settings);
-      if (groqClient) {
-          const prompt = `
-            TASK: High-Precision Product Specification Mapping
-            SKU: ${sku}
-            TARGET ATTRIBUTE SET: ${attributeSetName || 'DEFAULT_GENERAL'}
-            
-            DIRECTIONS:
-            1. Analyze the provided context (SAP Data, PDF and Web Scrapes) for the given SKU.
-            2. Map the relevant data points into the following headers:
-               ${headers.join(', ')}
-            3. Ensure compliance with these specific schema mapping rules:
-               ${mdRules}
-
-            CONTEXT 1 (SAP DATA):
-            ${skuRecord?.sap_data ? skuRecord.sap_data : 'No SAP data attached.'}
-
-            CONTEXT 2 (PDF Document):
-            ${skuRecord?.pdf_text ? skuRecord.pdf_text : 'No PDF attached.'}
-
-            CONTEXT 3 (Scraped Web Data):
-            ${markdown ? `Primary URL Scrape:\n${markdown}` : 'No Primary URL scraped data.'}
-            ${secondaryMarkdown ? `\nSecondary URL Scrape:\n${secondaryMarkdown}` : ''}
-
-            OUTPUT FORMAT: Return a valid JSON object where keys EXACTLY match the headers above.
-          `;
-          
-          try {
-            const groqResponse = await groqClient.chat.completions.create({
-              messages: [{ role: "user", content: prompt }],
-              model: aiModel || "llama-3.3-70b-versatile",
-              response_format: { type: "json_object" }
-            });
-            outputData = JSON.parse(groqResponse.choices[0]?.message?.content || '{}');
-          } catch (err: any) {
-             console.error(`[AI] Mapping failed for ${sku}:`, err.message);
-             throw err;
-          }
+      const job = jobQueue.enqueue('run_job', { sku, attributeSetName, aiModel });
+      const completed = await jobQueue.waitForJob(job.id, 120_000);
+      if (completed.status === 'completed') {
+        res.json({ success: true, data: completed.result });
       } else {
-          throw new Error("Groq API Key is not configured. Please add it in Connectivity settings.");
+        res.status(500).json({ error: completed.error || 'Mapping job failed' });
       }
-
-      // Map manual indexer fields to specific schemas
-      const manualOverrides: any = {};
-      if (skuRecord) {
-        if (skuRecord.shipping_weight) manualOverrides['attributes__shipping_weight'] = skuRecord.shipping_weight;
-        if (skuRecord.brand) manualOverrides['attributes__brand'] = skuRecord.brand;
-        if (skuRecord.ean) manualOverrides['attributes__lulu_ean'] = skuRecord.ean;
-        if (skuRecord.base_code) manualOverrides['base code'] = skuRecord.base_code;
-        if (skuRecord.product_type) manualOverrides['attributes__lulu_product_type'] = skuRecord.product_type;
-      }
-
-      // Ensure SKU and manual inputs are preserved and override AI output
-      const finalOutput = { 
-        ...outputData, 
-        ...manualOverrides,
-        SKU: sku,
-        sku: sku 
-      };
-
-      await dbService.saveOutput(safeSku, finalOutput);
-      res.json({ success: true, data: finalOutput });
-    } catch (e: any) {
-      console.error(`[AI_JOB] Failure for SKU ${sku}:`, e.message);
-      res.status(500).json({ error: e.message });
+    } catch (err: any) {
+      console.error(`[AI_JOB] Failure for SKU ${sku}:`, err.message);
+      res.status(err?.statusCode || 504).json({ error: err.message });
     }
   });
 
-  app.post("/api/outputs/:sku", async (req, res) => {
+  // ── Queue monitoring endpoints ─────────────────────────────────────────────
+  app.get('/api/queue/stats', requireAdminAuth, (_req, res) => {
+    res.json(jobQueue.getStats());
+  });
+
+  app.get('/api/queue/:jobId', requireAdminAuth, (req, res) => {
+    const job = jobQueue.getJob(req.params.jobId);
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    res.json(job);
+  });
+  // ─────────────────────────────────────────────────────────────────────────
+
+  app.post("/api/outputs/:sku", requireAdminAuth, async (req, res) => {
     try {
       const { sku } = req.params;
       const data = req.body;
@@ -1332,7 +1389,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/outputs/:sku", async (req, res) => {
+  app.delete("/api/outputs/:sku", requireAdminAuth, async (req, res) => {
     try {
       const { sku } = req.params;
       const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
@@ -1343,7 +1400,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/outputs/json/:filename", async (req, res) => {
+  app.get("/api/outputs/json/:filename", requireAdminAuth, async (req, res) => {
     try {
       const { filename } = req.params;
       const sku = filename.replace('.json', '');
@@ -1358,7 +1415,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/outputs/xlsx", async (req, res) => {
+  app.get("/api/outputs/xlsx", requireAdminAuth, async (req, res) => {
     try {
       const skusQuery = req.query.skus ? (req.query.skus as string).split(',') : null;
       let rows = await dbService.listOutputs();
@@ -1467,6 +1524,11 @@ async function startServer() {
     return groq;
   }
 
+  // Public liveness/readiness probe — no auth required, safe for platform health checks
+  app.get('/api/health', (_req, res) => {
+    res.json({ status: 'ok', ts: Date.now() });
+  });
+
   app.get('/api/admin/status', (req, res) => {
     res.json({ adminConfigured: !!ADMIN_KEY });
   });
@@ -1490,20 +1552,20 @@ async function startServer() {
       return res.status(403).json({ error: 'ADMIN_KEY is not configured on the server.' });
     }
     if (key === ADMIN_KEY) {
+      // Set httpOnly, secure cookie (CRITICAL SECURITY FIX)
+      res.cookie('admin_token', key, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'strict',
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+      });
       return res.json({ success: true });
     }
     return res.status(401).json({ error: 'Invalid admin key' });
   });
 
-  app.post("/api/settings", async (req, res) => {
+  app.post("/api/settings", requireAdminAuth, validateRequest(SettingsRequestSchema), async (req, res) => {
     try {
-      if (!ADMIN_KEY) {
-        return res.status(500).json({ error: 'ADMIN_KEY is not configured on the server.' });
-      }
-      const adminKey = req.headers['x-admin-key'];
-      if (typeof adminKey !== 'string' || adminKey !== ADMIN_KEY) {
-        return res.status(403).json({ error: 'Admin access required to update settings.' });
-      }
       const settings = req.body;
       await dbService.saveSettings(settings);
       currentGroq = buildGroqClient(settings.groqApiKey) || groq;
@@ -1513,7 +1575,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/settings", async (req, res) => {
+  app.get("/api/settings", requireAdminAuth, async (req, res) => {
     try {
       res.json(await dbService.getSettings());
     } catch (e) {
@@ -1521,7 +1583,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/images/extract", async (req, res) => {
+  app.post("/api/images/extract", requireAdminAuth, validateRequest(ImageExtractRequestSchema), async (req, res) => {
     const { sku, url, screenshotEnabled } = req.body;
     if (!sku || !url) {
       return res.status(400).json({ error: "SKU and URL are required" });
@@ -1746,7 +1808,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/images/render", async (req, res) => {
+  app.post("/api/images/render", requireAdminAuth, async (req, res) => {
     const { sku, url } = req.body || {};
     console.log('[IMAGE RENDER] Request:', { sku, url });
     
@@ -1799,7 +1861,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/images/:sku", async (req, res) => {
+  app.delete("/api/images/:sku", requireAdminAuth, async (req, res) => {
     try {
       const { sku } = req.params;
       const safeSku = sku.replace(/[^a-z0-9_-]/gi, '_');
@@ -1854,13 +1916,7 @@ async function startServer() {
   const shutdown = async (signal: string) => {
     console.log(`[SERVER] Received ${signal}, shutting down gracefully...`);
     server.close(async () => {
-      if (browser) {
-        try {
-          await browser.close();
-        } catch (e) {
-          console.error('[SERVER] Error while closing browser:', e);
-        }
-      }
+      await closeBrowser();
       process.exit(0);
     });
   };

@@ -1,3 +1,19 @@
-node_modules
-node_modules
+node_modules/
+dist/
+coverage/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
 firebase-service-account.json
+*.pem
+*.key
+
+# Generated runtime artifacts
+outputs/
+harvest/
+jobs/
+*.log
+npm-debug.log*
+yarn-error.log*
