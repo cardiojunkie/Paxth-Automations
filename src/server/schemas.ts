@@ -73,3 +73,66 @@ export const PageParamsSchema = z.object({
 });
 
 export type PageParams = z.infer<typeof PageParamsSchema>;
+
+// ── v2 schemas (strict limits, idempotency key) ───────────────────────────────
+
+/** Safe idempotency key: alphanumeric + hyphen/underscore, max 128 chars. */
+const IdempotencyKeySchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-zA-Z0-9_-]+$/, 'Idempotency key must be alphanumeric with hyphens or underscores')
+  .optional();
+
+export const V2ScrapeRequestSchema = z.object({
+  url: z.string().url('Invalid URL').max(2048),
+  selector: z.string().max(500).optional(),
+  extractWithGroq: z.boolean().optional(),
+  enableScreenshot: z.boolean().optional(),
+  strategy: z
+    .enum(['default', 'GroqExtractionStrategy', 'JsonLdExtractionStrategy', 'WholeCaptureStrategy'])
+    .optional(),
+  deepScroll: z.boolean().optional(),
+  sku: z.string().min(1).max(100).optional(),
+  secondaryTarget: z
+    .object({
+      url: z.string().url('Invalid URL').max(2048),
+      selector: z.string().max(500).optional(),
+      strategy: z.string().max(50).optional(),
+    })
+    .optional(),
+  idempotencyKey: IdempotencyKeySchema,
+});
+
+export const V2DiscoverRequestSchema = z.object({
+  url: z.string().url('Invalid URL').max(2048),
+  linkSelector: z.string().max(500).optional(),
+  idempotencyKey: IdempotencyKeySchema,
+});
+
+export const V2MappingRequestSchema = z.object({
+  sku: z.string().min(1).max(100),
+  attributeSetName: z.string().max(200).optional(),
+  aiModel: z.string().max(100).optional(),
+  idempotencyKey: IdempotencyKeySchema,
+});
+
+export const V2ExportRequestSchema = z.object({
+  format: z.enum(['xls', 'xlsx']).default('xls'),
+  /** Optional explicit SKU filter. Omit to export all outputs. */
+  skus: z.array(z.string().min(1).max(100)).max(1000).optional(),
+  idempotencyKey: IdempotencyKeySchema,
+});
+
+export const V2ImageExtractRequestSchema = z.object({
+  sku: z.string().min(1).max(100),
+  url: z.string().url('Invalid URL').max(2048),
+  screenshotEnabled: z.boolean().optional(),
+  idempotencyKey: IdempotencyKeySchema,
+});
+
+export type V2ScrapeRequest = z.infer<typeof V2ScrapeRequestSchema>;
+export type V2DiscoverRequest = z.infer<typeof V2DiscoverRequestSchema>;
+export type V2MappingRequest = z.infer<typeof V2MappingRequestSchema>;
+export type V2ExportRequest = z.infer<typeof V2ExportRequestSchema>;
+export type V2ImageExtractRequest = z.infer<typeof V2ImageExtractRequestSchema>;

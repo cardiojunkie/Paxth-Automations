@@ -194,3 +194,101 @@ export interface AnalyzeResponse {
 export interface DiscoverResponse {
   links: DiscoveredLink[];
 }
+
+// ── v2 API types ──────────────────────────────────────────────────────────────
+
+/**
+ * Stable error codes returned by all v2 endpoints.
+ * Callers should switch on these codes rather than HTTP status or message text.
+ */
+export type V2ErrorCode =
+  | 'unauthenticated'
+  | 'forbidden'
+  | 'csrf_invalid'
+  | 'validation_failed'
+  | 'rate_limited'
+  | 'queue_overloaded'
+  | 'not_found'
+  | 'conflict'
+  | 'upstream_timeout'
+  | 'internal_error';
+
+export interface V2ApiError {
+  code: V2ErrorCode;
+  message: string;
+  /** True when the client may safely retry the request after a short back-off. */
+  retryable: boolean;
+  details?: unknown;
+}
+
+/** Standard error envelope returned by all v2 endpoints on failure. */
+export interface V2ErrorResponse {
+  error: V2ApiError;
+  requestId?: string;
+}
+
+/**
+ * 202 Accepted response from any endpoint that enqueues an async job.
+ * Clients should poll `statusUrl` until `status` is 'completed' or 'failed'.
+ */
+export interface V2JobEnvelope {
+  jobId: string;
+  status: 'queued';
+  acceptedAt: string;
+  statusUrl: string;
+  cancelUrl: string;
+}
+
+/** Full job detail returned by GET /api/v2/jobs/:jobId */
+export interface V2JobDetail {
+  id: string;
+  type: AsyncJobType;
+  status: AsyncJobStatus;
+  retryCount: number;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  result?: unknown;
+  error: string | null;
+}
+
+/** Session info included in login/me responses when signed sessions are active. */
+export interface V2SessionInfo {
+  id: string;
+  expiresAt: string;
+}
+
+/** Response body from POST /api/auth/login when SESSION_SECRET is configured. */
+export interface V2LoginResponse {
+  success: true;
+  user: AuthUser;
+  /** Only present when signed sessions are active (SESSION_SECRET is set). */
+  session?: V2SessionInfo;
+  /** CSRF token to include as X-CSRF-Token header on subsequent state-changing requests. */
+  csrfToken?: string;
+}
+
+/** Response body from GET /api/v2/auth/me */
+export interface V2MeResponse {
+  authenticated: true;
+  user: AuthUser;
+  /** Only present when signed sessions are active. */
+  session?: V2SessionInfo;
+}
+
+/** Returned by PUT /api/v2/skus/:sku and PATCH /api/v2/skus/:sku */
+export interface V2SkuVersion {
+  sku: string;
+  /** Monotonically increasing version counter. Use as _ifVersion in PATCH requests. */
+  version: number;
+  updatedAt: string;
+}
+
+/** Queue depth stats returned by GET /api/v2/jobs */
+export interface V2QueueStats {
+  queued: number;
+  active: number;
+  total: number;
+  maxConcurrency: number;
+}

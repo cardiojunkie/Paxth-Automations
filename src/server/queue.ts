@@ -8,6 +8,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { BusyError } from './errors.js';
 
 export type AsyncJobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'retrying';
 export type AsyncJobType =
@@ -36,6 +37,8 @@ type JobHandler = (payload: Record<string, unknown>) => Promise<unknown>;
 
 const MAX_RETRIES = 2;
 const MAX_STORED_JOBS = 1000; // oldest completed/failed jobs purged beyond this
+/** Reject new enqueues beyond this depth to prevent unbounded memory growth. */
+const MAX_QUEUE_DEPTH = 200;
 
 export class InProcessQueue {
   private readonly pendingQueue: string[] = [];
@@ -55,8 +58,13 @@ export class InProcessQueue {
     this.handlers.set(type, handler);
   }
 
-  /** Enqueue a job. Returns the job record immediately with status='queued'. */
+  /** Enqueue a job. Returns the job record immediately with status='queued'. Throws BusyError if the pending queue is full. */
   enqueue(type: AsyncJobType, payload: Record<string, unknown>): AsyncJob {
+    if (this.pendingQueue.length >= MAX_QUEUE_DEPTH) {
+      throw new BusyError(
+        `Queue is at capacity (${MAX_QUEUE_DEPTH} pending jobs). Please retry shortly.`,
+      );
+    }
     const id = randomUUID();
     const job: AsyncJob = {
       id,
@@ -102,14 +110,29 @@ export class InProcessQueue {
       if (job.status === 'completed' || job.status === 'failed') return job;
       await new Promise<void>(resolve => setTimeout(resolve, 250));
     }
-    // Mark as failed on timeout so callers and polls see a terminal state
+    // Do NOT mutate job state here — the worker may still be running and will reach a
+    // terminal state on its own. The HTTP caller simply timed out waiting; they can
+    // poll GET /api/v2/jobs/:id to get the eventual result.
+    throw new Error('Job timed out waiting for completion');
+  }
+
+  /**
+   * Cancel a job that is still in the pending queue (not yet running).
+   * Returns true if the job was cancelled.
+   * Returns false if the job is already running, terminal, or not found.
+   * Running jobs cannot be interrupted — they must complete or fail on their own.
+   */
+  cancelJob(id: string): boolean {
     const job = this.jobs.get(id);
-    if (job && job.status !== 'completed') {
-      job.status = 'failed';
-      job.error = 'Job timed out waiting for completion';
-      job.completedAt = new Date().toISOString();
-    }
-    throw new Error('Job timed out');
+    if (!job) return false;
+    if (job.status !== 'queued' && job.status !== 'retrying') return false;
+    const idx = this.pendingQueue.indexOf(id);
+    if (idx === -1) return false; // status is queued but not in pending list — inconsistent state, leave it
+    this.pendingQueue.splice(idx, 1);
+    job.status = 'failed';
+    job.error = 'Cancelled by user';
+    job.completedAt = new Date().toISOString();
+    return true;
   }
 
   // ── Internal ──────────────────────────────────────────────────────────────

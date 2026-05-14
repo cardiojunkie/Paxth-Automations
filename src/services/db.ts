@@ -139,6 +139,21 @@ function _getSkuCached(): any[] {
   _skuCache = { data, loadedAt: now };
   return data;
 }
+
+// ── Per-SKU write serialization ───────────────────────────────────────────
+// Chains promises per SKU key so concurrent writes to the same SKU are
+// serialized rather than racing to write the master.json file.
+const _skuWriteLocks = new Map<string, Promise<unknown>>();
+
+function withSkuWriteLock<T>(sku: string, fn: () => Promise<T>): Promise<T> {
+  const prior = _skuWriteLocks.get(sku) ?? Promise.resolve();
+  // Chain fn after the prior operation. Swallow prior errors so they don't
+  // block subsequent work, but propagate fn errors to the caller normally.
+  const next = prior.catch(() => {}).then(() => fn());
+  // Store a silenced version in the map so the chain isn't broken by fn errors.
+  _skuWriteLocks.set(sku, next.catch(() => {}));
+  return next;
+}
 // ──────────────────────────────────────────────────────────────────────────
 
 const readJsonFile = <T>(filePath: string, fallback: T): T => {
@@ -217,6 +232,91 @@ export const dbService = {
       }
     }
     fs.writeFileSync(path.join(SKU_INDEX_DIR, 'master.json'), JSON.stringify(data, null, 2));
+  },
+
+  /**
+   * Atomically upsert a single SKU record without touching other SKUs.
+   * On the Firestore path this is a true atomic merge-set.
+   * On the file path it serialises per-SKU via a write lock to prevent lost updates.
+   */
+  async upsertSku(sku: string, data: Record<string, unknown>): Promise<{ sku: string; updatedAt: string }> {
+    const updatedAt = new Date().toISOString();
+    const record = { ...data, sku, _updatedAt: updatedAt };
+    _invalidateSkuCache();
+    if (db && canUseFirestore('sku')) {
+      try {
+        await db.collection('skus').doc(sku).set(record);
+        return { sku, updatedAt };
+      } catch (e: any) {
+        console.warn('[Firestore] upsertSku failed, falling back to file:', e.message);
+      }
+    }
+    await withSkuWriteLock(sku, async () => {
+      const fp = path.join(SKU_INDEX_DIR, 'master.json');
+      const all = readJsonFile(fp, [] as any[]);
+      const idx = all.findIndex((item: any) => (item.sku || item.SKU)?.toString() === sku);
+      if (idx !== -1) {
+        all[idx] = { ...all[idx], ...record };
+      } else {
+        all.push(record);
+      }
+      await fs.promises.writeFile(fp, JSON.stringify(all, null, 2));
+    });
+    return { sku, updatedAt };
+  },
+
+  /**
+   * Optimistic-concurrency patch for a single SKU.
+   * Pass `ifVersion` (the `_version` field from a prior read) to guard against lost updates.
+   * Returns the new version on success, or null when the version check fails (conflict).
+   */
+  async patchSku(
+    sku: string,
+    fields: Record<string, unknown>,
+    ifVersion?: number,
+  ): Promise<{ sku: string; version: number; updatedAt: string } | null> {
+    const updatedAt = new Date().toISOString();
+    _invalidateSkuCache();
+    if (db && canUseFirestore('sku')) {
+      try {
+        const result = await db.runTransaction(async (tx) => {
+          const ref = db!.collection('skus').doc(sku);
+          const snap = await tx.get(ref);
+          const current = snap.exists ? (snap.data() ?? {}) : {};
+          const currentVersion = typeof current._version === 'number' ? current._version : 0;
+          if (ifVersion !== undefined && currentVersion !== ifVersion) return null;
+          const newVersion = currentVersion + 1;
+          tx.set(ref, { ...current, ...fields, sku, _version: newVersion, _updatedAt: updatedAt });
+          return { sku, version: newVersion, updatedAt };
+        });
+        if (result !== null) return result;
+        return null; // version conflict
+      } catch (e: any) {
+        console.warn('[Firestore] patchSku failed, falling back to file:', e.message);
+      }
+    }
+    // File fallback with per-SKU serialisation
+    return withSkuWriteLock(sku, async () => {
+      const fp = path.join(SKU_INDEX_DIR, 'master.json');
+      const all = readJsonFile(fp, [] as any[]);
+      const idx = all.findIndex((item: any) => (item.sku || item.SKU)?.toString() === sku);
+      let currentVersion = 0;
+      let existing: Record<string, unknown> = {};
+      if (idx !== -1) {
+        existing = all[idx];
+        currentVersion = typeof existing._version === 'number' ? (existing._version as number) : 0;
+      }
+      if (ifVersion !== undefined && currentVersion !== ifVersion) return null;
+      const newVersion = currentVersion + 1;
+      const updated = { ...existing, ...fields, sku, _version: newVersion, _updatedAt: updatedAt };
+      if (idx !== -1) {
+        all[idx] = updated;
+      } else {
+        all.push(updated);
+      }
+      await fs.promises.writeFile(fp, JSON.stringify(all, null, 2));
+      return { sku, version: newVersion, updatedAt };
+    });
   },
 
   /** O(1) single-SKU lookup. Uses per-doc Firestore collection or in-memory cache. */
@@ -343,9 +443,13 @@ export const dbService = {
         console.error("[Firestore ERROR] Failed to save harvest:", e.message);
       }
     }
-    fs.writeFileSync(path.join(HARVEST_DIR, `${sku}.md`), content);
+    fs.promises.writeFile(path.join(HARVEST_DIR, `${sku}.md`), content).catch((e: any) => {
+      console.error('[DB] saveHarvest file write failed:', e.message);
+    });
     if (secondaryContent !== undefined) {
-      fs.writeFileSync(path.join(HARVEST_DIR, `${sku}_secondary.md`), secondaryContent);
+      fs.promises.writeFile(path.join(HARVEST_DIR, `${sku}_secondary.md`), secondaryContent).catch((e: any) => {
+        console.error('[DB] saveHarvest secondary file write failed:', e.message);
+      });
     }
   },
   async deleteHarvest(sku: string) {
@@ -407,7 +511,12 @@ export const dbService = {
         // ignore
       }
     }
-    fs.writeFileSync(path.join(OUTPUTS_DIR, `${sku}.json`), JSON.stringify(data, null, 2));
+    fs.promises.writeFile(
+      path.join(OUTPUTS_DIR, `${sku}.json`),
+      JSON.stringify(data, null, 2),
+    ).catch((e: any) => {
+      console.error('[DB] saveOutput file write failed:', e.message);
+    });
   },
   async deleteOutput(sku: string) {
     if (db && canUseFirestore('outputs')) {

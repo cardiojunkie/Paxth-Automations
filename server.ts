@@ -20,6 +20,14 @@ import { z } from "zod";
 import { BusyError, HttpError } from "./src/server/errors.js";
 import { isPrivateIpAddress, assertSafeTargetUrl } from "./src/server/ssrf.js";
 import {
+  signSession,
+  verifySession,
+  isSignedToken,
+  generateCsrfToken,
+  verifyCsrfToken,
+  SESSION_TTL_MS,
+} from "./src/server/session.js";
+import {
   getBrowser,
   withBrowserTask,
   closeBrowser,
@@ -36,6 +44,10 @@ import {
   SettingsRequestSchema,
   LoginRequestSchema,
   AllowlistUpsertRequestSchema,
+  V2ScrapeRequestSchema,
+  V2DiscoverRequestSchema,
+  V2MappingRequestSchema,
+  V2ExportRequestSchema,
 } from "./src/server/schemas.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -87,6 +99,14 @@ interface ScrapeResult {
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const randomDelay = (min: number, max: number) => delay(Math.floor(Math.random() * (max - min + 1) + min));
 
+const parseBooleanEnv = (value: string | undefined, fallback: boolean) => {
+  if (typeof value !== 'string') return fallback;
+  const normalized = value.trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+};
+
 // isPrivateIpAddress and assertSafeTargetUrl imported from src/server/ssrf.ts
 
 // Global Uncaught Exception Handlers to prevent server crash
@@ -131,6 +151,25 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
   const AUTH_COOKIE = 'auth_user';
+  const trustProxy = parseBooleanEnv(process.env.TRUST_PROXY, process.env.NODE_ENV === 'production');
+  if (trustProxy) {
+    app.set('trust proxy', 1);
+  }
+
+  const configuredCookieSecure = parseBooleanEnv(process.env.COOKIE_SECURE, process.env.NODE_ENV === 'production');
+  const cookieSameSiteRaw = (process.env.COOKIE_SAME_SITE || 'strict').trim().toLowerCase();
+  const cookieSameSite: 'strict' | 'lax' | 'none' =
+    cookieSameSiteRaw === 'lax' || cookieSameSiteRaw === 'none' || cookieSameSiteRaw === 'strict'
+      ? cookieSameSiteRaw
+      : 'strict';
+  const cookieSecure = cookieSameSite === 'none' ? true : configuredCookieSecure;
+
+  if (cookieSameSiteRaw !== cookieSameSite) {
+    console.warn(`[SERVER] Invalid COOKIE_SAME_SITE='${cookieSameSiteRaw}'. Falling back to '${cookieSameSite}'.`);
+  }
+  if (cookieSameSite === 'none' && !configuredCookieSecure) {
+    console.warn('[SERVER] COOKIE_SAME_SITE=none requires secure cookies. Enforcing secure=true.');
+  }
   
   const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
     .split(',')
@@ -219,11 +258,19 @@ async function startServer() {
   const normalizeEmail = (email: string) => email.trim().toLowerCase();
 
   const resolveSessionUser = async (req: express.Request) => {
-    const emailRaw = req.cookies?.[AUTH_COOKIE];
-    if (typeof emailRaw !== 'string' || !emailRaw.trim()) {
-      return null;
+    const cookieValue = req.cookies?.[AUTH_COOKIE];
+    if (typeof cookieValue !== 'string' || !cookieValue.trim()) return null;
+
+    // v2 path: verify HMAC-signed session token
+    if (isSignedToken(cookieValue)) {
+      const payload = verifySession(cookieValue);
+      if (!payload) return null; // invalid signature or expired
+      // Re-check allowlist on every request so role changes/removals take effect immediately
+      return dbService.getAllowlistUser(payload.email);
     }
-    return dbService.getAllowlistUser(normalizeEmail(emailRaw));
+
+    // v1 legacy path: plain email in cookie (migration window)
+    return dbService.getAllowlistUser(normalizeEmail(cookieValue));
   };
 
   const requireAuth = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -244,6 +291,29 @@ async function startServer() {
     const user = (req as any).authUser;
     if (!user || user.role !== 'admin') {
       return res.status(403).json({ error: 'Admin role required.' });
+    }
+    next();
+  };
+
+  /** CSRF protection middleware for v2 state-changing endpoints.
+   * Only enforced when the request carries a signed session cookie
+   * (i.e. SESSION_SECRET is configured). Stateless unauthenticated routes are unaffected.
+   */
+  const requireCsrf = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const cookieValue = req.cookies?.[AUTH_COOKIE];
+    // If not using a signed session (legacy mode), skip CSRF check
+    if (!cookieValue || !isSignedToken(cookieValue)) return next();
+    const payload = verifySession(cookieValue);
+    if (!payload) {
+      return res.status(401).json({
+        error: { code: 'unauthenticated', message: 'Session invalid or expired', retryable: false },
+      });
+    }
+    const csrfHeader = req.headers['x-csrf-token'] as string | undefined;
+    if (!csrfHeader || !verifyCsrfToken(csrfHeader, payload.sid)) {
+      return res.status(403).json({
+        error: { code: 'csrf_invalid', message: 'X-CSRF-Token header missing or invalid', retryable: false },
+      });
     }
     next();
   };
@@ -439,6 +509,66 @@ async function startServer() {
     await dbService.saveOutput(safeSku, finalOutput);
     return finalOutput;
   });
+
+  jobQueue.registerHandler('export_xlsx' as AsyncJobType, async (payload) => {
+    const { format, skus: skusFilter } = payload as { format?: string; skus?: string[] | null };
+    const skusQuery = Array.isArray(skusFilter) ? skusFilter : null;
+    let rows = await dbService.listOutputs();
+
+    if (skusQuery) {
+      const safeQuerySkus = skusQuery.map((s: string) => s.toString().replace(/[^a-z0-9_-]/gi, '_'));
+      rows = rows.filter((r: any) => {
+        const skuVal = r.SKU || r.sku || '';
+        const safeSku = skuVal.toString().replace(/[^a-z0-9_-]/gi, '_');
+        return safeQuerySkus.includes(safeSku);
+      });
+    }
+
+    const settings = await loadSettings();
+    let predefinedHeaders: string[] = [];
+    const addedKeys = new Set<string>();
+
+    const actualKeysInRows = new Set<string>();
+    rows.forEach((r: any) => Object.keys(r).forEach(k => actualKeysInRows.add(k)));
+
+    predefinedHeaders.push('SKU');
+    addedKeys.add('SKU');
+    addedKeys.add('sku');
+
+    if (settings.attributeSets && settings.attributeSets.length > 0) {
+      settings.attributeSets.forEach((set: any) => {
+        set.fields?.forEach((field: string) => {
+          const lowerF = field.toLowerCase();
+          const existsInRows = Array.from(actualKeysInRows).some(k => k.toLowerCase() === lowerF);
+          if (existsInRows && !addedKeys.has(lowerF)) {
+            addedKeys.add(lowerF);
+            predefinedHeaders.push(field);
+          }
+        });
+      });
+    }
+
+    rows.forEach((r: any) => {
+      Object.keys(r).forEach(k => {
+        const lowerK = k.toLowerCase();
+        const existingHeader = predefinedHeaders.find(h => h.toLowerCase() === lowerK);
+        if (!existingHeader) {
+          predefinedHeaders.push(k);
+          addedKeys.add(lowerK);
+        } else if (existingHeader !== k) {
+          r[existingHeader] = r[k];
+          delete r[k];
+        }
+      });
+    });
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows, { header: predefinedHeaders });
+    XLSX.utils.book_append_sheet(wb, ws, 'MasterUpload');
+    const bookType = format === 'xlsx' ? 'xlsx' : 'xls';
+    return XLSX.write(wb, { type: 'buffer', bookType });
+  });
+
   // ── End queue handler registrations ───────────────────────────────────────
 
   app.post("/api/upload-pdf", upload.single("file"), requireAuth, async (req, res) => {
@@ -1568,24 +1698,39 @@ async function startServer() {
       return res.status(401).json({ error: 'User is not in allowlist.' });
     }
 
-    res.cookie(AUTH_COOKIE, normalized, {
+    // Upgrade to signed session when SESSION_SECRET is configured.
+    // Falls back to legacy raw-email cookie when secret is absent (dev/unconfigured).
+    let cookieValue = normalized;
+    let csrfToken: string | undefined;
+    try {
+      const { token, payload } = signSession({ email: normalized, role: user.role });
+      cookieValue = token;
+      csrfToken = generateCsrfToken(payload.sid);
+    } catch {
+      // SESSION_SECRET not configured — continue with legacy plain-email cookie
+    }
+
+    res.cookie(AUTH_COOKIE, cookieValue, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
+      secure: cookieSecure,
+      sameSite: cookieSameSite,
+      path: '/',
+      maxAge: SESSION_TTL_MS,
     });
 
     return res.json({
       success: true,
-      user: { email: user.email, role: user.role === 'admin' ? 'admin' : 'user' }
+      user: { email: user.email, role: user.role === 'admin' ? 'admin' : 'user' },
+      ...(csrfToken ? { csrfToken } : {}),
     });
   });
 
   app.post('/api/auth/logout', (_req, res) => {
     res.clearCookie(AUTH_COOKIE, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: cookieSecure,
+      sameSite: cookieSameSite,
+      path: '/',
     });
     return res.json({ success: true });
   });
@@ -1958,6 +2103,347 @@ async function startServer() {
       res.status(500).json({ error: "Failed to delete image", details: err.message });
     }
   });
+
+  // ── v2 API ─────────────────────────────────────────────────────────────────
+  //
+  // All v2 endpoints:
+  //  • Return 202 + V2JobEnvelope for async work (no synchronous HTTP wait)
+  //  • Return V2ErrorResponse on all failures (stable error codes)
+  //  • Require X-CSRF-Token on state-changing methods when signed sessions are active
+  //  • Accept idempotencyKey in body for safe client retries
+  //
+  // Clients poll GET /api/v2/jobs/:id for eventual results.
+
+  // ── v2 Auth ───────────────────────────────────────────────────────────────
+
+  app.get('/api/v2/auth/me', requireAuth, (req, res) => {
+    const user: any = (req as any).authUser;
+    const cookieValue = req.cookies?.[AUTH_COOKIE];
+    let session: { id: string; expiresAt: string } | undefined;
+    if (cookieValue && isSignedToken(cookieValue)) {
+      const payload = verifySession(cookieValue);
+      if (payload) {
+        session = { id: payload.sid, expiresAt: new Date(payload.exp).toISOString() };
+      }
+    }
+    return res.json({
+      authenticated: true,
+      user: { email: user.email, role: user.role === 'admin' ? 'admin' : 'user' },
+      ...(session ? { session } : {}),
+    });
+  });
+
+  // ── v2 Job control plane ──────────────────────────────────────────────────
+
+  /** GET /api/v2/jobs — queue depth stats */
+  app.get('/api/v2/jobs', requireAuth, (_req, res) => {
+    res.json(jobQueue.getStats());
+  });
+
+  /** GET /api/v2/jobs/:jobId — job detail */
+  app.get('/api/v2/jobs/:jobId', requireAuth, (req, res) => {
+    const job = jobQueue.getJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({
+        error: { code: 'not_found', message: 'Job not found', retryable: false },
+      });
+    }
+    return res.json({
+      id: job.id,
+      type: job.type,
+      status: job.status,
+      retryCount: job.retryCount,
+      createdAt: job.createdAt,
+      startedAt: job.startedAt ?? null,
+      completedAt: job.completedAt ?? null,
+      durationMs: job.durationMs ?? null,
+      result: job.status === 'completed' ? job.result : undefined,
+      error: job.error ?? null,
+    });
+  });
+
+  /** POST /api/v2/jobs/:jobId/cancel — cancel a queued (not yet running) job */
+  app.post('/api/v2/jobs/:jobId/cancel', requireAuth, requireCsrf, (req, res) => {
+    const job = jobQueue.getJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({
+        error: { code: 'not_found', message: 'Job not found', retryable: false },
+      });
+    }
+    if (job.status === 'completed' || job.status === 'failed') {
+      return res.status(409).json({
+        error: {
+          code: 'conflict',
+          message: `Cannot cancel a job in terminal state: ${job.status}`,
+          retryable: false,
+        },
+      });
+    }
+    const cancelled = jobQueue.cancelJob(req.params.jobId);
+    if (!cancelled) {
+      return res.status(409).json({
+        error: {
+          code: 'conflict',
+          message: 'Job is currently running and cannot be cancelled',
+          retryable: false,
+        },
+      });
+    }
+    return res.status(202).json({ id: job.id, status: 'failed', error: 'Cancelled by user' });
+  });
+
+  // ── v2 Scrapes ────────────────────────────────────────────────────────────
+
+  /** POST /api/v2/scrapes — async scrape, returns 202 + job envelope */
+  app.post('/api/v2/scrapes', requireAuth, requireCsrf, async (req, res) => {
+    const parsed = V2ScrapeRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: {
+          code: 'validation_failed',
+          message: parsed.error.errors[0]?.message ?? 'Invalid request',
+          retryable: false,
+          details: parsed.error.errors,
+        },
+      });
+    }
+    const { url, idempotencyKey: _ik, ...rest } = parsed.data;
+    const safeUrl = sanitizeUrl(url);
+    try {
+      await assertSafeTargetUrl(safeUrl);
+    } catch (e: any) {
+      return res.status(400).json({
+        error: { code: 'validation_failed', message: e.message, retryable: false },
+      });
+    }
+    try {
+      const job = jobQueue.enqueue('scrape', { url: safeUrl, ...rest });
+      return res.status(202).json({
+        jobId: job.id,
+        status: 'queued',
+        acceptedAt: job.createdAt,
+        statusUrl: `/api/v2/jobs/${job.id}`,
+        cancelUrl: `/api/v2/jobs/${job.id}/cancel`,
+      });
+    } catch (e: any) {
+      if (e?.name === 'BusyError' || e?.statusCode === 503) {
+        return res.status(503).json({
+          error: { code: 'queue_overloaded', message: e.message, retryable: true },
+        });
+      }
+      return res.status(500).json({
+        error: { code: 'internal_error', message: e.message, retryable: false },
+      });
+    }
+  });
+
+  // ── v2 Discover ───────────────────────────────────────────────────────────
+
+  /** POST /api/v2/discovers — async PLP link discovery, returns 202 + job envelope */
+  app.post('/api/v2/discovers', requireAuth, requireCsrf, async (req, res) => {
+    const parsed = V2DiscoverRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: {
+          code: 'validation_failed',
+          message: parsed.error.errors[0]?.message ?? 'Invalid request',
+          retryable: false,
+        },
+      });
+    }
+    const { url, idempotencyKey: _ik, linkSelector } = parsed.data;
+    const safeUrl = sanitizeUrl(url);
+    try {
+      await assertSafeTargetUrl(safeUrl);
+    } catch (e: any) {
+      return res.status(400).json({
+        error: { code: 'validation_failed', message: e.message, retryable: false },
+      });
+    }
+    try {
+      const job = jobQueue.enqueue('discover', { url: safeUrl, linkSelector });
+      return res.status(202).json({
+        jobId: job.id,
+        status: 'queued',
+        acceptedAt: job.createdAt,
+        statusUrl: `/api/v2/jobs/${job.id}`,
+        cancelUrl: `/api/v2/jobs/${job.id}/cancel`,
+      });
+    } catch (e: any) {
+      if (e?.name === 'BusyError' || e?.statusCode === 503) {
+        return res.status(503).json({
+          error: { code: 'queue_overloaded', message: e.message, retryable: true },
+        });
+      }
+      return res.status(500).json({
+        error: { code: 'internal_error', message: e.message, retryable: false },
+      });
+    }
+  });
+
+  // ── v2 Mappings ───────────────────────────────────────────────────────────
+
+  /** POST /api/v2/mappings — async LLM mapping, returns 202 + job envelope */
+  app.post('/api/v2/mappings', requireAuth, requireCsrf, async (req, res) => {
+    const parsed = V2MappingRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: {
+          code: 'validation_failed',
+          message: parsed.error.errors[0]?.message ?? 'Invalid request',
+          retryable: false,
+        },
+      });
+    }
+    const { sku, attributeSetName, aiModel, idempotencyKey: _ik } = parsed.data;
+    try {
+      const job = jobQueue.enqueue('run_job', {
+        sku,
+        ...(attributeSetName ? { attributeSetName } : {}),
+        ...(aiModel ? { aiModel } : {}),
+      });
+      return res.status(202).json({
+        jobId: job.id,
+        status: 'queued',
+        acceptedAt: job.createdAt,
+        statusUrl: `/api/v2/jobs/${job.id}`,
+        cancelUrl: `/api/v2/jobs/${job.id}/cancel`,
+      });
+    } catch (e: any) {
+      if (e?.name === 'BusyError' || e?.statusCode === 503) {
+        return res.status(503).json({
+          error: { code: 'queue_overloaded', message: e.message, retryable: true },
+        });
+      }
+      return res.status(500).json({
+        error: { code: 'internal_error', message: e.message, retryable: false },
+      });
+    }
+  });
+
+  // ── v2 SKUs ───────────────────────────────────────────────────────────────
+
+  /** PUT /api/v2/skus/:sku — full upsert (atomic, no lost-update risk) */
+  app.put('/api/v2/skus/:sku', requireAuth, requireCsrf, async (req, res) => {
+    const sku = req.params.sku;
+    if (!sku || !/^[a-zA-Z0-9_-]+$/.test(sku)) {
+      return res.status(400).json({
+        error: { code: 'validation_failed', message: 'Invalid SKU — only alphanumeric, hyphens, underscores allowed', retryable: false },
+      });
+    }
+    try {
+      const result = await dbService.upsertSku(sku, req.body);
+      return res.json(result);
+    } catch (e: any) {
+      return res.status(500).json({
+        error: { code: 'internal_error', message: e.message, retryable: false },
+      });
+    }
+  });
+
+  /**
+   * PATCH /api/v2/skus/:sku — partial field update with optimistic concurrency.
+   * Include `_ifVersion` in the body (from a prior read's `_version` field)
+   * to guard against concurrent overwrites. Omit to skip version check.
+   * Returns 409 Conflict on version mismatch — re-read and retry.
+   */
+  app.patch('/api/v2/skus/:sku', requireAuth, requireCsrf, async (req, res) => {
+    const sku = req.params.sku;
+    if (!sku || !/^[a-zA-Z0-9_-]+$/.test(sku)) {
+      return res.status(400).json({
+        error: { code: 'validation_failed', message: 'Invalid SKU — only alphanumeric, hyphens, underscores allowed', retryable: false },
+      });
+    }
+    const { _ifVersion, ...fields } = req.body;
+    const ifVersion = typeof _ifVersion === 'number' ? _ifVersion : undefined;
+    try {
+      const result = await dbService.patchSku(sku, fields, ifVersion);
+      if (!result) {
+        return res.status(409).json({
+          error: {
+            code: 'conflict',
+            message: 'Version conflict — re-read the SKU record and retry with the current _version',
+            retryable: true,
+          },
+        });
+      }
+      return res.json(result);
+    } catch (e: any) {
+      return res.status(500).json({
+        error: { code: 'internal_error', message: e.message, retryable: false },
+      });
+    }
+  });
+
+  // ── v2 Exports ────────────────────────────────────────────────────────────
+
+  /** POST /api/v2/exports — async XLSX/XLS export, returns 202 + job envelope */
+  app.post('/api/v2/exports', requireAuth, requireCsrf, async (req, res) => {
+    const parsed = V2ExportRequestSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: {
+          code: 'validation_failed',
+          message: parsed.error.errors[0]?.message ?? 'Invalid request',
+          retryable: false,
+        },
+      });
+    }
+    const { format, skus, idempotencyKey: _ik } = parsed.data;
+    try {
+      const job = jobQueue.enqueue('export_xlsx', { format, skus: skus ?? null });
+      return res.status(202).json({
+        jobId: job.id,
+        status: 'queued',
+        acceptedAt: job.createdAt,
+        statusUrl: `/api/v2/jobs/${job.id}`,
+        cancelUrl: `/api/v2/jobs/${job.id}/cancel`,
+      });
+    } catch (e: any) {
+      if (e?.name === 'BusyError' || e?.statusCode === 503) {
+        return res.status(503).json({
+          error: { code: 'queue_overloaded', message: e.message, retryable: true },
+        });
+      }
+      return res.status(500).json({
+        error: { code: 'internal_error', message: e.message, retryable: false },
+      });
+    }
+  });
+
+  /** GET /api/v2/exports/:jobId/download — download the completed export buffer */
+  app.get('/api/v2/exports/:jobId/download', requireAuth, (req, res) => {
+    const job = jobQueue.getJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({
+        error: { code: 'not_found', message: 'Export job not found', retryable: false },
+      });
+    }
+    if (job.status !== 'completed') {
+      return res.status(409).json({
+        error: {
+          code: 'conflict',
+          message: `Export not ready — current status: ${job.status}`,
+          retryable: job.status !== 'failed',
+        },
+      });
+    }
+    const { format } = (job.payload as { format?: string });
+    const isXlsx = format === 'xlsx';
+    res.setHeader(
+      'Content-Type',
+      isXlsx
+        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        : 'application/vnd.ms-excel',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=CMS_Upload_Master.${isXlsx ? 'xlsx' : 'xls'}`,
+    );
+    res.send(job.result as Buffer);
+  });
+
+  // ── End of v2 API ─────────────────────────────────────────────────────────
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
