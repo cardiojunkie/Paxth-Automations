@@ -35,7 +35,7 @@ export interface AsyncJob {
 
 type JobHandler = (payload: Record<string, unknown>) => Promise<unknown>;
 
-const MAX_RETRIES = 2;
+const MAX_RETRIES = 3;
 const MAX_STORED_JOBS = 1000; // oldest completed/failed jobs purged beyond this
 /** Reject new enqueues beyond this depth to prevent unbounded memory growth. */
 const MAX_QUEUE_DEPTH = 200;
@@ -167,7 +167,11 @@ export class InProcessQueue {
       if (job.retryCount < MAX_RETRIES) {
         job.retryCount++;
         job.status = 'retrying';
-        const backoffMs = Math.pow(2, job.retryCount) * 500;
+        // Use longer backoff for transient HTTP errors (502/503/504/timeout/ECONNRESET)
+      const isTransient = /502|503|504|timeout|ECONNRESET|ETIMEDOUT/i.test(msg);
+      const backoffMs = isTransient
+        ? [5_000, 15_000, 30_000][Math.min(job.retryCount - 1, 2)]
+        : Math.pow(2, job.retryCount) * 500;
         setTimeout(() => {
           job.status = 'queued';
           this.pendingQueue.push(job.id);

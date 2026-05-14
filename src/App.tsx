@@ -44,6 +44,23 @@ interface AllowlistUser {
 }
 
 
+/**
+ * Poll a queue job until it completes (or fails/times out).
+ * Returns the job result on success; throws on failure or timeout.
+ */
+async function pollJob(jobId: string, maxMs = 180_000): Promise<any> {
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 2_000));
+    const res = await apiFetch(`/api/queue/${jobId}`);
+    if (!res.ok) throw new Error(`Job status check failed (HTTP ${res.status})`);
+    const job = await res.json();
+    if (job.status === 'completed') return job.result;
+    if (job.status === 'failed') throw new Error(job.error || 'Job failed');
+  }
+  throw new Error('Job timed out waiting for result');
+}
+
 export default function App() {
   const defaultSelectorPresets = [
     {
@@ -705,7 +722,7 @@ export default function App() {
     addLog('system', `Initiating Batch Harvest [${batchData.length} items]...`);
     setProgress(1);
 
-    const BATCH_SIZE = 5;
+    const BATCH_SIZE = 2;
     for (let i = 0; i < batchData.length; i += BATCH_SIZE) {
       const currentBatch = batchData.slice(i, i + BATCH_SIZE);
       addLog('action', `Processing Batch ${Math.floor(i/BATCH_SIZE) + 1}...`);
@@ -713,7 +730,8 @@ export default function App() {
       const promises = currentBatch.map(async (item, idx) => {
         const globalIdx = i + idx;
         try {
-          const response = await apiFetch('/api/scrape', {
+          // Step 1: enqueue
+          const startRes = await apiFetch('/api/scrape', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
@@ -727,18 +745,15 @@ export default function App() {
             })
           });
           
-          const contentType = response.headers.get("content-type");
-          if (!response.ok || !contentType?.includes("application/json")) {
-            const text = await response.text();
-            let errorMsg = `HTTP ${response.status} on ${item.sku}`;
-            try {
-              const errData = JSON.parse(text);
-              errorMsg = errData.details || errData.error || errorMsg;
-            } catch { /* response was not JSON */ }
-            throw new Error(errorMsg);
+          if (!startRes.ok) {
+            const errData = await startRes.json().catch(() => ({}));
+            throw new Error(errData.details || errData.error || `HTTP ${startRes.status}`);
           }
           
-          const data = await response.json();
+          const { jobId } = await startRes.json();
+          
+          // Step 2: poll until done
+          const data = await pollJob(jobId, 180_000);
           
           let report = "";
           if (strategy === 'LLMExtractionStrategy') {
@@ -749,7 +764,6 @@ export default function App() {
           }
 
           // Save to backend
-          // The server now handles auto-saving if SKU is passed, but we'll keep this as fallback or ensure consistency
           await apiFetch('/api/save-batch', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1068,27 +1082,21 @@ export default function App() {
         };
       }
 
-      const response = await apiFetch('/api/scrape', {
+      const startRes = await apiFetch('/api/scrape', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(requestBody)
       });
 
-      const contentType = response.headers.get("content-type");
-      if (!response.ok || !contentType?.includes("application/json")) {
-        const text = await response.text();
-        console.error("Server error response:", text);
-        let errorMsg = `Scrape failed (HTTP ${response.status}). The site may be blocking the request or the server timed out.`;
-        try {
-          const errorData = JSON.parse(text);
-          errorMsg = errorData.details || errorData.error || errorMsg;
-        } catch {
-          // response was not JSON at all — keep default message
-        }
-        throw new Error(errorMsg);
+      if (!startRes.ok) {
+        const errData = await startRes.json().catch(() => ({}));
+        throw new Error(errData.details || errData.error || `Scrape failed (HTTP ${startRes.status})`);
       }
+      const { jobId } = await startRes.json();
+      addLog('network', `Job enqueued (${jobId}). Polling for result...`);
+      setProgress(20);
       
-      const data = await response.json();
+      const data = await pollJob(jobId, 180_000);
       
       // OPTIMIZED SEQUENTIAL UPDATES TO PREVENT MAIN-THREAD BLOCKING
       addLog('network', `Loaded content from ${data.title || 'URL'} (${Math.round(data.text.length / 1024)}kb)`);
@@ -1155,21 +1163,33 @@ export default function App() {
     addLog('system', `Discovery initialised on base: ${url}`);
     
     try {
-      const response = await apiFetch('/api/discover', {
+      // Enqueue discover job (returns 202)
+      const startRes = await apiFetch('/api/discover', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url, linkSelector: plpSelector })
       });
       
-      const contentType = response.headers.get("content-type");
-      if (!response.ok || !contentType?.includes("application/json")) {
-        throw new Error(`Server returned invalid response. Amazon/Google often block automated access.`);
+      if (!startRes.ok) {
+        const errData = await startRes.json().catch(() => ({}));
+        throw new Error(errData.details || errData.error || `Discovery failed (HTTP ${startRes.status})`);
       }
+      const { jobId } = await startRes.json();
+      addLog('network', `Discovery job enqueued (${jobId}). Polling...`);
 
-      const data = await response.json();
-      if (data.links) {
-        setDiscoveredLinks(data.links);
-        addLog('success', `Discovered ${data.links.length} targets. Select targets to begin deep extraction.`);
+      // Poll until done; discover result is an array of { href, text }
+      const links = await pollJob(jobId, 60_000);
+
+      if (Array.isArray(links) && links.length > 0) {
+        // Normalize links
+        const urlObj = new URL(url);
+        const normalizedLinks = links
+          .map((link: any) => ({ ...link, href: link.href?.startsWith('/') ? urlObj.origin + link.href : link.href }))
+          .filter((v: any, i: number, a: any[]) => a.findIndex((t: any) => t.href === v.href) === i);
+        setDiscoveredLinks(normalizedLinks);
+        addLog('success', `Discovered ${normalizedLinks.length} targets. Select targets to begin deep extraction.`);
+      } else {
+        addLog('error', 'Discovery returned no links. Try a different selector.');
       }
     } catch (e: any) {
       addLog('error', `Discovery failed: ${e.message}`);
@@ -1186,7 +1206,7 @@ export default function App() {
     addLog('system', `Processing ${selectedLinks.length} total targets in optimized batches.`);
 
     let fullReport = "";
-    const BATCH_SIZE = 5;
+    const BATCH_SIZE = 2;
     
     // Process in batches
     for (let i = 0; i < selectedLinks.length; i += BATCH_SIZE) {
@@ -1196,7 +1216,8 @@ export default function App() {
        const batchPromises = batch.map(async (linkUrl, index) => {
          const globalIndex = i + index;
          try {
-           const response = await apiFetch('/api/scrape', {
+           // Step 1: enqueue
+           const startRes = await apiFetch('/api/scrape', {
              method: 'POST',
              headers: { 'Content-Type': 'application/json' },
              body: JSON.stringify({ 
@@ -1207,26 +1228,22 @@ export default function App() {
                enableScreenshot: screenshotEnabled 
              })
            });
-           
-           const contentType = response.headers.get("content-type");
-           if (!response.ok || !contentType?.includes("application/json")) {
-             const text = await response.text();
-             try {
-               const errData = JSON.parse(text);
-               throw new Error(errData.details || errData.error || `HTTP ${response.status}`);
-             } catch (e) {
-               throw new Error(`Critical Error (${response.status})`);
-             }
-           }
 
-           const data = await response.json();
+           if (!startRes.ok) {
+             const errData = await startRes.json().catch(() => ({}));
+             throw new Error(errData.details || errData.error || `HTTP ${startRes.status}`);
+           }
+           const { jobId } = await startRes.json();
+
+           // Step 2: poll until done
+           const data = await pollJob(jobId, 180_000);
            
            let pageReport = "";
            if (strategy === 'LLMExtractionStrategy') {
               addLog('error', 'Advanced Strategy inactive.');
               pageReport = "ADVANCED_INACTIVE";
            } else {
-              pageReport = data.groqResult || data.text; // Removed 1000 char truncation
+              pageReport = data.groqResult || data.text;
            }
            
            addLog('success', `[${globalIndex + 1}/${selectedLinks.length}] Harvested: ${data.title || 'Page'}`);
@@ -1376,13 +1393,6 @@ export default function App() {
           </h1>
         </div>
         <div className="flex items-center gap-6">
-          <button
-            onClick={authUser ? logout : submitLogin}
-            className={`text-[10px] px-3 py-1.5 rounded border uppercase tracking-widest font-bold transition-colors ${authUser ? 'border-green-500/40 text-green-400 hover:bg-green-500/10' : 'border-white/20 text-white/50 hover:text-white/80 hover:border-white/40'}`}
-            title={authUser ? `${authUser.email} (${authUser.role})` : 'Login with allowlisted email'}
-          >
-            {authUser ? `Logout (${authUser.role})` : 'Login'}
-          </button>
           <div className="flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${isScraping ? 'bg-blue-500 animate-pulse' : 'bg-green-500 status-pulse'} shadow-[0_0_8px_rgba(34,197,94,0.5)]`}></div>
             <span className={`text-[10px] ${isScraping ? 'text-blue-500' : 'text-green-500'} font-mono tracking-wider uppercase`}>
@@ -2340,6 +2350,21 @@ export default function App() {
         {/* CENTER PANEL: INTERACTIVE HUB */}
         <section id="main-content" className="flex-1 flex flex-col bg-black/5 min-h-0 relative">
           <div className="flex-1 p-6 overflow-y-auto custom-scrollbar flex flex-col gap-6 min-h-0">
+            <div className="flex items-center justify-between bg-black/30 border border-white/10 rounded-xl px-4 py-3">
+              <div className="min-w-0">
+                <p className="text-[10px] uppercase tracking-widest text-white/40">Signed In</p>
+                <p className="text-sm text-white truncate">
+                  {authUser.email} <span className="text-white/40">({authUser.role})</span>
+                </p>
+              </div>
+              <button
+                onClick={logout}
+                className="ml-4 px-4 py-2 rounded-lg bg-white/5 hover:bg-red-600 border border-white/15 hover:border-red-500 text-[10px] font-bold uppercase tracking-widest text-white/80 hover:text-white transition-colors"
+                title="End current session and sign in as another user"
+              >
+                Logout & Switch User
+              </button>
+            </div>
              
              {/* MODULE VIEW CONDITIONAL */}
              {currentModule === 'settings' ? (
@@ -3128,7 +3153,7 @@ export default function App() {
                                        <button onClick={async () => {
                                           addLog('skill', `AI Dispatching mapping for SKU ${job.sku}...`);
                                           try {
-                                            const res = await apiFetch('/api/jobs/run', {
+                                            const startRes = await apiFetch('/api/jobs/run', {
                                               method: 'POST',
                                               headers: {'Content-Type': 'application/json'},
                                               body: JSON.stringify({ 
@@ -3136,12 +3161,17 @@ export default function App() {
                                                  aiModel: jobAiModels[job.sku] || 'llama-3.3-70b-versatile'
                                                })
                                             });
-                                            if(res.ok) { addLog('success', `SKU ${job.sku} mapping cycle complete.`); fetchJobs(); }
-                                            else {
-                                               const errData = await res.json().catch(() => null);
-                                               addLog('error', `Mapping failed for ${job.sku}${errData?.error ? ': ' + errData.error : ''}`);
+                                            if (!startRes.ok) {
+                                              const errData = await startRes.json().catch(() => ({}));
+                                              addLog('error', `Mapping failed for ${job.sku}: ${errData?.error || `HTTP ${startRes.status}`}`);
+                                              return;
                                             }
-                                          } catch (e) { addLog('error', 'Critical network failure during Dispatch.'); }
+                                            const { jobId } = await startRes.json();
+                                            addLog('skill', `Mapping job queued (${jobId}). Waiting for result...`);
+                                            await pollJob(jobId, 180_000);
+                                            addLog('success', `SKU ${job.sku} mapping cycle complete.`);
+                                            fetchJobs();
+                                          } catch (e: any) { addLog('error', `Mapping failed for ${job.sku}: ${e.message}`); }
                                        }} className="px-4 py-1.5 h-[26px] bg-blue-600 hover:bg-blue-500 rounded text-[10px] font-bold uppercase tracking-widest text-white shadow-lg transition-all active:scale-95 flex items-center">MAP AI</button>
                                      </div>
                                   ))}

@@ -49,5 +49,15 @@
     "attribute_set": "Elec-C&A-Laptops",
     "base_code": "",
     "sap_data": "1"
+  },
+  {
+    "sku": "12",
+    "brand": "12",
+    "ean": "12",
+    "shipping_weight": "12",
+    "product_type": "12",
+    "attribute_set": "Elec-HA-Vacuum Cleaners",
+    "base_code": "12",
+    "sap_data": "12"
   }
 ]

@@ -17,3 +17,4 @@ jobs/
 *.log
 npm-debug.log*
 yarn-error.log*
+settings/app_settings.json

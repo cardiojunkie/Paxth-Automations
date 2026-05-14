@@ -11,11 +11,17 @@ services:
         value: production
       - key: PORT
         value: "3000"
-      - key: ADMIN_KEY
-        sync: false
       - key: FIRESTORE_MODE
         value: all
       - key: GROQ_API_KEY
         sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: COOKIE_SAME_SITE
+        value: strict
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: TRUST_PROXY
+        value: "true"
       - key: FIREBASE_SERVICE_ACCOUNT_JSON
         sync: false

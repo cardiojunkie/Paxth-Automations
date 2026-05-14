@@ -367,9 +367,55 @@ async function startServer() {
   // (scrapeTarget, performInspection, loadSettings, resolveGroqClient) — all
   // `async function` declarations so they are hoisted within startServer scope.
   jobQueue.registerHandler('scrape' as AsyncJobType, async (payload) => {
-    const { url, selector, extractWithGroq, enableScreenshot, strategy, deepScroll } =
-      payload as unknown as ScrapeTargetData;
-    return await scrapeTarget({ url, selector, extractWithGroq, enableScreenshot, strategy, deepScroll });
+    const { url, selector, extractWithGroq, enableScreenshot, strategy, deepScroll, sku, secondaryTarget } =
+      payload as unknown as ScrapeTargetData & { sku?: string; secondaryTarget?: { url: string; selector?: string; strategy?: string } };
+    const primaryResult = await scrapeTarget({ url, selector, extractWithGroq, enableScreenshot, strategy, deepScroll });
+    let secondaryResult: ScrapeResult | null = null;
+    if (secondaryTarget?.url) {
+      try {
+        secondaryResult = await scrapeTarget({
+          url: secondaryTarget.url,
+          selector: secondaryTarget.selector || selector,
+          strategy: (secondaryTarget.strategy || strategy) as ScrapeTargetData['strategy'],
+          extractWithGroq,
+          enableScreenshot,
+          deepScroll,
+        });
+      } catch (err: any) {
+        console.warn(`[SCRAPE] Secondary target failed: ${err.message}`);
+      }
+    }
+    if (sku) {
+      const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
+      try {
+        await dbService.saveHarvest(
+          safeSku,
+          primaryResult.groqResult || primaryResult.markdown,
+          secondaryResult ? (secondaryResult.groqResult || secondaryResult.markdown) : undefined
+        );
+        console.log(`[SCRAPE] Auto-saved harvest: ${safeSku}`);
+      } catch (e: any) {
+        console.warn(`[SCRAPE] Auto-save failed for ${safeSku}: ${e.message}`);
+      }
+    }
+    // Shape result to match what the frontend expects
+    return {
+      success: true,
+      text: primaryResult.markdown,
+      groqResult: primaryResult.groqResult,
+      imageUrls: primaryResult.imageUrls,
+      title: primaryResult.pageTitle,
+      url: primaryResult.url,
+      ...(primaryResult.screenshotBase64 ? { screenshot: `data:image/jpeg;base64,${primaryResult.screenshotBase64}` } : {}),
+      secondary: secondaryResult ? {
+        url: secondaryResult.url,
+        text: secondaryResult.markdown,
+        groqResult: secondaryResult.groqResult,
+        imageUrls: secondaryResult.imageUrls,
+        title: secondaryResult.pageTitle,
+        ...(secondaryResult.screenshotBase64 ? { screenshot: `data:image/jpeg;base64,${secondaryResult.screenshotBase64}` } : {}),
+      } : null,
+    };
   });
 
   jobQueue.registerHandler('inspect' as AsyncJobType, async (payload) => {
@@ -1142,7 +1188,8 @@ async function startServer() {
     return u;
   }
 
-  // API Route for scraping and optional Groq extraction
+  // API Route for scraping — non-blocking async (returns 202 + jobId).
+  // Clients poll GET /api/queue/:jobId until completed then read .result.
   app.post("/api/scrape", requireAuth, validateRequest(ScrapeRequestSchema), async (req, res) => {
     let { url, selector, extractWithGroq, enableScreenshot, sku, strategy, deepScroll, secondaryTarget } = req.body;
 
@@ -1154,105 +1201,41 @@ async function startServer() {
       try { new URL(sanitizeUrl(url)); } catch (e) { return res.status(400).json({ error: "Invalid URL format" }); }
       await assertSafeTargetUrl(sanitizeUrl(url));
 
-      const primaryJob = jobQueue.enqueue('scrape', { url: sanitizeUrl(url), selector, extractWithGroq, enableScreenshot, strategy, deepScroll });
-      const completedPrimary = await jobQueue.waitForJob(primaryJob.id, 90_000);
-      if (completedPrimary.status !== 'completed') {
-        throw Object.assign(new Error(completedPrimary.error || 'Scrape failed'), { statusCode: 500 });
-      }
-      const primaryResult = completedPrimary.result as ScrapeResult;
-      let secondaryResult = null;
-
-      if (secondaryTarget && secondaryTarget.url) {
-        await assertSafeTargetUrl(sanitizeUrl(secondaryTarget.url));
-        const secondaryJob = jobQueue.enqueue('scrape', {
-          url: sanitizeUrl(secondaryTarget.url),
-          selector: secondaryTarget.selector || selector,
-          strategy: secondaryTarget.strategy || strategy,
-          extractWithGroq,
-          enableScreenshot,
-          deepScroll,
-        });
-        const completedSecondary = await jobQueue.waitForJob(secondaryJob.id, 90_000);
-        if (completedSecondary.status === 'completed') {
-          secondaryResult = completedSecondary.result as ScrapeResult;
-        }
-      }
-
-      if (sku) {
-        const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
-        await dbService.saveHarvest(
-          safeSku, 
-          primaryResult.groqResult || primaryResult.markdown,
-          secondaryResult ? (secondaryResult.groqResult || secondaryResult.markdown) : undefined
-        );
-        console.log(`[SERVER] Auto-saved harvest to Firestore: ${safeSku} (with secondary data: ${!!secondaryResult})`);
-      }
-
-      res.json({
-        url,
-        success: true,
-        text: primaryResult.markdown,
-        groqResult: primaryResult.groqResult,
-        imageUrls: primaryResult.imageUrls,
-        ...(primaryResult.screenshotBase64 ? { screenshot: `data:image/jpeg;base64,${primaryResult.screenshotBase64}` } : {}),
-        title: primaryResult.pageTitle,
-        secondary: secondaryResult ? {
-          url: secondaryResult.url,
-          text: secondaryResult.markdown,
-          groqResult: secondaryResult.groqResult,
-          imageUrls: secondaryResult.imageUrls,
-          ...(secondaryResult.screenshotBase64 ? { screenshot: `data:image/jpeg;base64,${secondaryResult.screenshotBase64}` } : {}),
-          title: secondaryResult.pageTitle
-        } : null
+      const primaryJob = jobQueue.enqueue('scrape', {
+        url: sanitizeUrl(url), selector, extractWithGroq, enableScreenshot, strategy, deepScroll, sku,
+        secondaryTarget: secondaryTarget && secondaryTarget.url
+          ? { url: sanitizeUrl(secondaryTarget.url), selector: secondaryTarget.selector || selector, strategy: secondaryTarget.strategy || strategy }
+          : undefined,
+      });
+      return res.status(202).json({
+        jobId: primaryJob.id,
+        status: 'queued',
+        statusUrl: `/api/queue/${primaryJob.id}`,
       });
     } catch (error: any) {
-      console.error(`[SERVER] Extraction failed: ${error.message}`);
-      res.status(error?.statusCode || 500).json({ 
-        error: "Extraction Error", 
-        details: error.message,
-        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-      });
+      if (error?.name === 'BusyError' || error?.statusCode === 503) {
+        return res.status(503).json({ error: 'Queue overloaded. Please retry shortly.' });
+      }
+      console.error(`[SERVER] Scrape enqueue failed: ${error.message}`);
+      return res.status(error?.statusCode || 500).json({ error: "Enqueue Error", details: error.message });
     }
   });
 
-  // API Route for Discovery Mode (Deep Crawl)
+  // API Route for Discovery Mode — non-blocking async (returns 202 + jobId).
   app.post("/api/discover", requireAuth, validateRequest(DiscoverRequestSchema), async (req, res) => {
     let { url, linkSelector } = req.body;
     if (!url) return res.status(400).json({ error: "URL is required" });
-    
     url = sanitizeUrl(url);
     try { new URL(url); } catch(e) { return res.status(400).json({ error: "Invalid URL format" }); }
-    await assertSafeTargetUrl(url);
-
-    let context: any = null;
     try {
-      const discoverJob = jobQueue.enqueue('discover', { url, linkSelector });
-      const completedDiscover = await jobQueue.waitForJob(discoverJob.id, 60_000);
-      if (completedDiscover.status !== 'completed') {
-        throw Object.assign(new Error(completedDiscover.error || 'Discovery failed'), { statusCode: 500 });
-      }
-      const links = completedDiscover.result as any[];
-
-      // Normalize links
-      const urlObj = new URL(url);
-      const normalizedLinks = links.map(link => {
-        if (link.href.startsWith('/')) {
-           link.href = urlObj.origin + link.href;
-        }
-        return link;
-      }).filter((v, i, a) => a.findIndex(t => t.href === v.href) === i); // Deduplicate
-
-      res.json({ success: true, links: normalizedLinks });
+      await assertSafeTargetUrl(url);
+      const job = jobQueue.enqueue('discover', { url, linkSelector });
+      return res.status(202).json({ jobId: job.id, status: 'queued', statusUrl: `/api/queue/${job.id}` });
     } catch (error: any) {
-      if (context) {
-        try {
-          await context.close();
-        } catch (closeError) {
-          const closeErr = closeError as Error;
-          console.error(`[SERVER] Failed to close discovery context: ${closeErr.message}`);
-        }
+      if (error?.name === 'BusyError' || error?.statusCode === 503) {
+        return res.status(503).json({ error: 'Queue overloaded. Please retry shortly.' });
       }
-      res.status(error?.statusCode || 500).json({ error: "Discovery Error", details: error.message });
+      return res.status(error?.statusCode || 500).json({ error: "Discovery Error", details: error.message });
     }
   });
 
@@ -1371,20 +1354,18 @@ async function startServer() {
 
   app.post("/api/inspect", requireAuth, async (req, res) => {
     try {
-        let url = req.body.url;
-        if (!url) return res.status(400).json({ error: "URL is required" });
-        url = sanitizeUrl(url);
-        try { new URL(url); } catch(e) { return res.status(400).json({ error: "Invalid URL format" }); }
-        await assertSafeTargetUrl(url);
-        
-        const inspectJob = jobQueue.enqueue('inspect', { url, deepScroll: req.body.deepScroll });
-        const completedInspect = await jobQueue.waitForJob(inspectJob.id, 90_000);
-        if (completedInspect.status !== 'completed') {
-          throw Object.assign(new Error(completedInspect.error || 'Inspection failed'), { statusCode: 500 });
-        }
-        res.json(completedInspect.result);
+      let url = req.body.url;
+      if (!url) return res.status(400).json({ error: "URL is required" });
+      url = sanitizeUrl(url);
+      try { new URL(url); } catch(e) { return res.status(400).json({ error: "Invalid URL format" }); }
+      await assertSafeTargetUrl(url);
+      const job = jobQueue.enqueue('inspect', { url, deepScroll: req.body.deepScroll });
+      return res.status(202).json({ jobId: job.id, status: 'queued', statusUrl: `/api/queue/${job.id}` });
     } catch (error: any) {
-        res.status(error?.statusCode || 500).json({ error: "Inspection failed", details: error.message });
+      if (error?.name === 'BusyError' || error?.statusCode === 503) {
+        return res.status(503).json({ error: 'Queue overloaded. Please retry shortly.' });
+      }
+      return res.status(error?.statusCode || 500).json({ error: "Inspection failed", details: error.message });
     }
   });
 
@@ -1395,8 +1376,10 @@ async function startServer() {
         const safeUrl = sanitizeUrl(url);
         try { new URL(safeUrl); } catch(e) { return res.status(400).json({ error: "Invalid URL format" }); }
         await assertSafeTargetUrl(safeUrl);
+        // Start inspection job and wait for it (analysis requires the full DOM inspection result)
         const analyzeJob = jobQueue.enqueue('inspect', { url: safeUrl, deepScroll });
-        const completedAnalyze = await jobQueue.waitForJob(analyzeJob.id, 90_000);
+        console.log(`[ANALYZE] Enqueued inspect job ${analyzeJob.id} for ${safeUrl}`);
+        const completedAnalyze = await jobQueue.waitForJob(analyzeJob.id, 120_000);
         if (completedAnalyze.status !== 'completed') {
           throw Object.assign(new Error(completedAnalyze.error || 'Inspection failed'), { statusCode: 500 });
         }
@@ -1508,15 +1491,17 @@ async function startServer() {
     if (!sku) return res.status(400).json({ error: "SKU required" });
     try {
       const job = jobQueue.enqueue('run_job', { sku, attributeSetName, aiModel });
-      const completed = await jobQueue.waitForJob(job.id, 120_000);
-      if (completed.status === 'completed') {
-        res.json({ success: true, data: completed.result });
-      } else {
-        res.status(500).json({ error: completed.error || 'Mapping job failed' });
-      }
+      return res.status(202).json({
+        jobId: job.id,
+        status: 'queued',
+        statusUrl: `/api/queue/${job.id}`,
+      });
     } catch (err: any) {
-      console.error(`[AI_JOB] Failure for SKU ${sku}:`, err.message);
-      res.status(err?.statusCode || 504).json({ error: err.message });
+      if (err?.name === 'BusyError' || err?.statusCode === 503) {
+        return res.status(503).json({ error: 'Queue overloaded. Please retry shortly.' });
+      }
+      console.error(`[AI_JOB] Enqueue failure for SKU ${sku}:`, err.message);
+      return res.status(500).json({ error: err.message });
     }
   });
 
@@ -1529,6 +1514,33 @@ async function startServer() {
     const job = jobQueue.getJob(req.params.jobId);
     if (!job) return res.status(404).json({ error: 'Job not found' });
     res.json(job);
+  });
+
+  // Browser health-check/diagnostics endpoint — visits example.com and returns status
+  app.get('/api/diagnostics/browser', requireAuth, async (_req, res) => {
+    const start = Date.now();
+    let browser: any = null;
+    let context: any = null;
+    try {
+      browser = await getBrowser();
+      context = await browser.newContext({ ignoreHTTPSErrors: true });
+      const page = await context.newPage();
+      const resp = await page.goto('https://example.com', { waitUntil: 'domcontentloaded', timeout: 20_000 });
+      const title = await page.title();
+      const finalUrl = page.url();
+      await context.close();
+      return res.json({
+        ok: true,
+        engine: (browser as any)?._initializer?.name ?? 'unknown',
+        status: resp?.status() ?? null,
+        url: finalUrl,
+        title,
+        durationMs: Date.now() - start,
+      });
+    } catch (err: any) {
+      if (context) { try { await context.close(); } catch {} }
+      return res.status(500).json({ ok: false, error: err.message, durationMs: Date.now() - start });
+    }
   });
   // ─────────────────────────────────────────────────────────────────────────
 
