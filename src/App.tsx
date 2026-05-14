@@ -1,7 +1,6 @@
 import { apiFetch } from "./auth";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PresetDropdown } from "./components/PresetDropdown";
-import { SkillCard } from "./components/SkillCard";
 import type { SkuRecord, HarvestFile, Job } from "./types";
 /**
  * @license
@@ -14,7 +13,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import * as XLSX from 'xlsx';
 
-// ErrorBoundary, PresetDropdown, SkillCard are imported from ./components/
+// ErrorBoundary and PresetDropdown are imported from ./components/
 // Types LogEntry and FirestoreHealth are defined here for local use in App.tsx
 
 interface LogEntry {
@@ -43,22 +42,56 @@ interface AllowlistUser {
   addedAt?: string | null;
 }
 
+const SCRAPE_JOB_POLL_TIMEOUT_MS = 600_000;
+const DISCOVERY_JOB_POLL_TIMEOUT_MS = 120_000;
+
 
 /**
  * Poll a queue job until it completes (or fails/times out).
  * Returns the job result on success; throws on failure or timeout.
  */
-async function pollJob(jobId: string, maxMs = 180_000): Promise<any> {
+async function pollJob(jobId: string, maxMs = SCRAPE_JOB_POLL_TIMEOUT_MS): Promise<any> {
   const deadline = Date.now() + maxMs;
+  let lastKnownStatus = 'queued';
+  let lastKnownRetryCount = 0;
+  let lastKnownDurationMs: number | undefined;
+
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 2_000));
     const res = await apiFetch(`/api/queue/${jobId}`);
     if (!res.ok) throw new Error(`Job status check failed (HTTP ${res.status})`);
     const job = await res.json();
+    lastKnownStatus = job?.status || lastKnownStatus;
+    lastKnownRetryCount = Number(job?.retryCount || 0);
+    if (typeof job?.durationMs === 'number') {
+      lastKnownDurationMs = job.durationMs;
+    }
     if (job.status === 'completed') return job.result;
     if (job.status === 'failed') throw new Error(job.error || 'Job failed');
   }
-  throw new Error('Job timed out waiting for result');
+
+  try {
+    const finalRes = await apiFetch(`/api/queue/${jobId}`);
+    if (finalRes.ok) {
+      const finalJob = await finalRes.json();
+      if (finalJob.status === 'completed') return finalJob.result;
+      if (finalJob.status === 'failed') {
+        throw new Error(finalJob.error || 'Job failed');
+      }
+      throw new Error(
+        `Job still ${finalJob.status || 'running'} after ${Math.round(maxMs / 1000)}s (retryCount=${Number(finalJob?.retryCount || 0)}).`
+      );
+    }
+  } catch {
+    // Fall through to the generic timeout message using last known state.
+  }
+
+  const elapsedSummary = typeof lastKnownDurationMs === 'number'
+    ? `, durationMs=${lastKnownDurationMs}`
+    : '';
+  throw new Error(
+    `Job timed out after ${Math.round(maxMs / 1000)}s (lastStatus=${lastKnownStatus}, retryCount=${lastKnownRetryCount}${elapsedSummary}).`
+  );
 }
 
 export default function App() {
@@ -753,7 +786,7 @@ export default function App() {
           const { jobId } = await startRes.json();
           
           // Step 2: poll until done
-          const data = await pollJob(jobId, 180_000);
+          const data = await pollJob(jobId, SCRAPE_JOB_POLL_TIMEOUT_MS);
           
           let report = "";
           if (strategy === 'LLMExtractionStrategy') {
@@ -1096,7 +1129,7 @@ export default function App() {
       addLog('network', `Job enqueued (${jobId}). Polling for result...`);
       setProgress(20);
       
-      const data = await pollJob(jobId, 180_000);
+      const data = await pollJob(jobId, SCRAPE_JOB_POLL_TIMEOUT_MS);
       
       // OPTIMIZED SEQUENTIAL UPDATES TO PREVENT MAIN-THREAD BLOCKING
       addLog('network', `Loaded content from ${data.title || 'URL'} (${Math.round(data.text.length / 1024)}kb)`);
@@ -1178,7 +1211,7 @@ export default function App() {
       addLog('network', `Discovery job enqueued (${jobId}). Polling...`);
 
       // Poll until done; discover result is an array of { href, text }
-      const links = await pollJob(jobId, 60_000);
+      const links = await pollJob(jobId, DISCOVERY_JOB_POLL_TIMEOUT_MS);
 
       if (Array.isArray(links) && links.length > 0) {
         // Normalize links
@@ -1236,7 +1269,7 @@ export default function App() {
            const { jobId } = await startRes.json();
 
            // Step 2: poll until done
-           const data = await pollJob(jobId, 180_000);
+           const data = await pollJob(jobId, SCRAPE_JOB_POLL_TIMEOUT_MS);
            
            let pageReport = "";
            if (strategy === 'LLMExtractionStrategy') {
@@ -1385,12 +1418,14 @@ export default function App() {
         {/* TOP NAVIGATION BAR */}
       <nav id="top-nav" className="h-14 border-b border-white/10 flex items-center justify-between px-6 bg-black/40 z-10 backdrop-blur-sm">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center font-bold text-white shadow-lg shadow-blue-600/20">
-            C4
+          <div
+            className="w-8 h-8 rounded flex items-center justify-center text-xl bg-white/10 border border-white/20 shadow-lg shadow-white/5"
+            aria-label="MooStudioza logo"
+            role="img"
+          >
+            <span className="cow-bob" aria-hidden="true">🐄</span>
           </div>
-          <h1 className="text-lg font-medium tracking-tight">
-            Moos <span className="text-white/40 font-light text-sm pl-1">Studio v2.4</span>
-          </h1>
+          <h1 className="text-lg font-medium tracking-tight">MooStudioza</h1>
         </div>
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
@@ -3168,7 +3203,7 @@ export default function App() {
                                             }
                                             const { jobId } = await startRes.json();
                                             addLog('skill', `Mapping job queued (${jobId}). Waiting for result...`);
-                                            await pollJob(jobId, 180_000);
+                                            await pollJob(jobId, SCRAPE_JOB_POLL_TIMEOUT_MS);
                                             addLog('success', `SKU ${job.sku} mapping cycle complete.`);
                                             fetchJobs();
                                           } catch (e: any) { addLog('error', `Mapping failed for ${job.sku}: ${e.message}`); }
@@ -3471,79 +3506,6 @@ export default function App() {
           </div>
         </section>
 
-        {/* RIGHT PANEL: CAPABILITIES / SKILLS */}
-        <aside id="skills-panel" className="w-72 border-l border-cyan-900/40 p-6 bg-[#030712] hidden lg:flex flex-col gap-6 relative overflow-hidden shrink-0">
-          {/* subtle background corner brackets */}
-          <div className="absolute top-2 left-2 w-4 h-4 border-t-2 border-l-2 border-cyan-800/50"></div>
-          <div className="absolute bottom-2 right-2 w-4 h-4 border-b-2 border-r-2 border-cyan-800/50"></div>
-
-          <div className="flex items-center justify-between mx-[-8px] border-b border-cyan-900/40 pb-3 mb-2 px-2 relative z-10">
-            <label className="text-[10px] uppercase tracking-[0.3em] text-cyan-400 font-bold font-mono">
-              Engine Capabilities
-            </label>
-            <Zap className="w-3.5 h-3.5 text-cyan-500/70" />
-          </div>
-          
-          <div className="space-y-4 overflow-y-auto hidden-scrollbar flex-1 pr-2 relative z-10">
-            <SkillCard 
-              title="Axios HTTP" 
-              tag="CORE" 
-              description="Reliable network fetching with header rotation." 
-              type="blue" 
-              active={true}
-            />
-            <SkillCard 
-              title="Cheerio DOM" 
-              tag="ACTIVE" 
-              description="Fast server-side traversal and element cleaning." 
-              type="green" 
-              active={isScraping}
-            />
-            <SkillCard 
-              title="Advanced AI" 
-              tag="EXTRACT" 
-              description="High-fidelity LLM translation & summarization." 
-              type="yellow" 
-              active={isScraping && strategy === 'LLMExtractionStrategy'}
-            />
-            <SkillCard 
-              title="Proxy Mesh" 
-              tag="SMART" 
-              description="Bypassing rate limits and IP blocking." 
-              type="muted" 
-              active={false}
-            />
-          </div>
-
-          <div className="mt-auto pt-6 border-t border-cyan-900/40 relative z-10">
-            <div className="flex justify-between items-end mb-3">
-              <label className="text-[10px] uppercase tracking-[0.3em] text-cyan-400 font-bold font-mono">
-                Node Load
-              </label>
-              <span className="text-[9px] font-mono text-cyan-500/50">[{isScraping ? 'FLCT' : 'STBL'}]</span>
-            </div>
-            
-            <div className="grid grid-cols-7 gap-1.5 h-16 relative">
-              <div className="absolute inset-0 border border-cyan-900/30 bg-cyan-950/10 pointer-events-none -mx-2 -my-2 p-2"></div>
-              {[40, 60, 35, 85, 55, 95, 70].map((h, i) => {
-                const heightVal = isScraping ? Math.floor(Math.random() * 60 + 40) : h;
-                const isHigh = heightVal > 80;
-                return (
-                  <div key={i} className="flex flex-col justify-end h-full w-full gap-0.5 group relative">
-                    <div className="text-[8px] text-center font-mono opacity-0 group-hover:opacity-100 text-cyan-500 transition-opacity absolute -top-4 w-full">
-                      {heightVal}
-                    </div>
-                    <div 
-                      className={`w-full transition-all duration-[600ms] ${isScraping ? 'animate-pulse' : ''} ${isHigh ? 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.5)]' : 'bg-cyan-500/60 shadow-[0_0_5px_rgba(6,182,212,0.3)]'}`} 
-                      style={{ height: `${heightVal}%` }}
-                    />
-                    <div className={`w-full h-1 mt-0.5 ${isHigh ? 'bg-amber-600' : 'bg-cyan-700'}`} />
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </aside>
       </main>
 
       {/* FOOTER */}
@@ -3865,4 +3827,3 @@ export default function App() {
     </ErrorBoundary>
   );
 }
-// SkillCard is imported from ./components/SkillCard

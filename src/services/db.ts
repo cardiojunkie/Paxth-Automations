@@ -168,6 +168,9 @@ const readJsonFile = <T>(filePath: string, fallback: T): T => {
   }
 };
 
+const isNonEmptyObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length > 0;
+
 export const dbService = {
   getFirestoreStatus() {
     return {
@@ -619,7 +622,13 @@ export const dbService = {
     if (db && canUseFirestore('settings')) {
       try {
         const docSnap = await db.collection('settings').doc('app_settings').get();
-        if (docSnap.exists) return docSnap.data()?.data || {};
+        if (docSnap.exists) {
+          const remoteSettings = docSnap.data()?.data;
+          if (isNonEmptyObject(remoteSettings)) {
+            return remoteSettings;
+          }
+          console.warn('[Firestore] app_settings is empty. Falling back to settings/app_settings.json.');
+        }
       } catch (e: any) {
         // ignore
       }

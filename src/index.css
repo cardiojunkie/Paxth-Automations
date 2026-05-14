@@ -36,6 +36,12 @@
     animation: status-pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
   }
 
+  .cow-bob {
+    display: inline-block;
+    animation: cow-bob 2.2s ease-in-out infinite;
+    transform-origin: center bottom;
+  }
+
   .markdown-body table {
     @apply w-full border-collapse my-4;
   }
@@ -50,4 +56,9 @@
 @keyframes status-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: .4; }
+}
+
+@keyframes cow-bob {
+  0%, 100% { transform: translateY(0) rotate(-1deg); }
+  50% { transform: translateY(-2px) rotate(1deg); }
 }

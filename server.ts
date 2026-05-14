@@ -628,6 +628,22 @@ async function startServer() {
 
   // ── End queue handler registrations ───────────────────────────────────────
 
+  const warmBrowserOnStart = parseBooleanEnv(
+    process.env.WARM_BROWSER_ON_START,
+    process.env.NODE_ENV === 'production',
+  );
+  if (warmBrowserOnStart) {
+    setTimeout(() => {
+      getBrowser()
+        .then(() => {
+          console.log('[BROWSER] Warm-up complete. Browser is ready for queue jobs.');
+        })
+        .catch((err: any) => {
+          console.warn(`[BROWSER] Warm-up failed: ${err?.message || 'unknown error'}`);
+        });
+    }, 2_000);
+  }
+
   app.post("/api/upload-pdf", upload.single("file"), requireAuth, async (req, res) => {
     try {
       if (!req.file) {
