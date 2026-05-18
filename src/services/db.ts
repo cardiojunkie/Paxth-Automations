@@ -468,6 +468,17 @@ export const dbService = {
     const fpSecondary = path.join(HARVEST_DIR, `${sku}_secondary.md`);
     if (fs.existsSync(fpSecondary)) fs.unlinkSync(fpSecondary);
   },
+  async deleteSku(sku: string) {
+    // Explicitly delete the per-SKU Firestore document so it no longer
+    // appears in listSkusPaginated queries after the index file is updated.
+    if (db && canUseFirestore('sku')) {
+      try {
+        await db.collection('skus').doc(sku).delete();
+      } catch (e: any) {
+        // ignore — file path is always the source of truth
+      }
+    }
+  },
   async listHarvests() {
     if (db && canUseFirestore('harvest')) {
       try {

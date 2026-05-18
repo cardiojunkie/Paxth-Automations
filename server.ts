@@ -107,6 +107,161 @@ const parseBooleanEnv = (value: string | undefined, fallback: boolean) => {
   return fallback;
 };
 
+const IMAGE_NEGATIVE_KEYWORDS = [
+  'logo',
+  'icon',
+  'sprite',
+  'banner',
+  'rating',
+  'star',
+  'thumbnail',
+  'thumb',
+  'avatar',
+  'placeholder',
+  'pixel'
+];
+
+const IMAGE_POSITIVE_KEYWORDS = [
+  'product',
+  'gallery',
+  'zoom',
+  'large',
+  'hires',
+  'highres',
+  'full',
+  'original',
+  'master'
+];
+
+function normalizeImageUrl(rawUrl: string, pageUrl: string): string | null {
+  if (!rawUrl) return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('blob:')) return null;
+
+  try {
+    const normalized = trimmed.startsWith('//') ? `https:${trimmed}` : trimmed;
+    const parsed = new URL(normalized, pageUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function extractUrlsFromSrcset(srcsetValue: string): string[] {
+  return srcsetValue
+    .split(',')
+    .map((part) => part.trim().split(/\s+/)[0])
+    .filter(Boolean);
+}
+
+function isLikelyImageUrl(url: string): boolean {
+  const lower = url.toLowerCase();
+  const imageExtPattern = /\.(jpg|jpeg|png|webp|avif|gif|bmp|jfif)(\?|$)/;
+  if (imageExtPattern.test(lower)) return true;
+  if (lower.endsWith('.svg')) return false;
+
+  const hasImageKeyword = /(image|img|media|product|zoom|large|hires|original)/.test(lower);
+  const hasDimensionHint = /(\d{3,4})[x_](\d{3,4})/.test(lower);
+  const hasImageQuery = /(format=|fm=|w=|h=|quality=|q=|fit=)/.test(lower);
+
+  return hasImageKeyword && (hasDimensionHint || hasImageQuery);
+}
+
+function collectImageUrlsFromJsonLdValue(value: unknown, accumulator: string[]): void {
+  if (!value) return;
+
+  if (typeof value === 'string') {
+    if (isLikelyImageUrl(value)) {
+      accumulator.push(value);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((entry) => collectImageUrlsFromJsonLdValue(entry, accumulator));
+    return;
+  }
+
+  if (typeof value !== 'object') return;
+
+  const rec = value as Record<string, unknown>;
+  if (typeof rec.url === 'string' && isLikelyImageUrl(rec.url)) accumulator.push(rec.url);
+  if (typeof rec.contentUrl === 'string' && isLikelyImageUrl(rec.contentUrl)) accumulator.push(rec.contentUrl);
+  if (typeof rec.thumbnailUrl === 'string' && isLikelyImageUrl(rec.thumbnailUrl)) accumulator.push(rec.thumbnailUrl);
+
+  if ('image' in rec) {
+    collectImageUrlsFromJsonLdValue(rec.image, accumulator);
+  }
+
+  if (Array.isArray(rec['@graph'])) {
+    rec['@graph'].forEach((entry) => collectImageUrlsFromJsonLdValue(entry, accumulator));
+  }
+
+  const nestedImageKeys = ['offers', 'aggregateOffer', 'potentialAction'];
+  nestedImageKeys.forEach((key) => {
+    if (key in rec) {
+      collectImageUrlsFromJsonLdValue(rec[key], accumulator);
+    }
+  });
+}
+
+function scoreImageUrl(url: string): number {
+  const lower = url.toLowerCase();
+  if (lower.endsWith('.svg') || IMAGE_NEGATIVE_KEYWORDS.some((k) => lower.includes(k))) {
+    return -100;
+  }
+
+  let score = 0;
+
+  if (IMAGE_POSITIVE_KEYWORDS.some((k) => lower.includes(k))) {
+    score += 30;
+  }
+
+  if (lower.includes('data-old-hires') || lower.includes('zoom') || lower.includes('original')) {
+    score += 25;
+  }
+
+  const dimensionMatch = lower.match(/(\d{3,4})[x_](\d{3,4})/);
+  if (dimensionMatch) {
+    const width = Number(dimensionMatch[1]);
+    const height = Number(dimensionMatch[2]);
+    const area = width * height;
+    if (area >= 1_000_000) score += 35;
+    else if (area >= 400_000) score += 20;
+    else if (area <= 40_000) score -= 25;
+  }
+
+  if (lower.match(/(small|tiny|mini)\b/)) {
+    score -= 20;
+  }
+
+  return score;
+}
+
+function rankHighQualityImageUrls(rawUrls: string[], pageUrl: string, trustedUrls: Set<string> = new Set()): string[] {
+  const bestByUrl = new Map<string, number>();
+
+  rawUrls.forEach((raw) => {
+    const normalized = normalizeImageUrl(raw, pageUrl);
+    if (!normalized) return;
+    const likelyImage = isLikelyImageUrl(normalized);
+    if (!likelyImage && !trustedUrls.has(normalized)) return;
+    const score = scoreImageUrl(normalized);
+    if (score < 0) return;
+
+    const existingScore = bestByUrl.get(normalized);
+    if (existingScore === undefined || score > existingScore) {
+      bestByUrl.set(normalized, score);
+    }
+  });
+
+  return Array.from(bestByUrl.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([url]) => url);
+}
+
 // isPrivateIpAddress and assertSafeTargetUrl imported from src/server/ssrf.ts
 
 // Global Uncaught Exception Handlers to prevent server crash
@@ -715,12 +870,41 @@ async function startServer() {
     }
   });
 
+  // Bulk cascade-delete via POST to avoid browser stripping DELETE request bodies
+  app.post("/api/sku/index/purge", requireAuth, async (req, res) => {
+    try {
+      const { skus } = req.body;
+      if (!Array.isArray(skus) || skus.length === 0) {
+        return res.status(400).json({ error: 'skus array required' });
+      }
+      const skuSet = new Set(skus.map((s: any) => s.toString()));
+      const data = await dbService.getSkuIndex();
+      const filtered = data.filter((item: any) => !skuSet.has((item.sku || item.SKU)?.toString()));
+      await dbService.updateSkuIndex(filtered);
+      await Promise.allSettled(
+        skus.map(async (sku: string) => {
+          await dbService.deleteSku(sku).catch(() => {});
+          await dbService.deleteHarvest(sku).catch(() => {});
+          await dbService.deleteOutput(sku).catch(() => {});
+        })
+      );
+      res.json({ success: true, deleted: skus.length });
+    } catch (e) {
+      res.status(500).json({ error: 'Bulk delete failed' });
+    }
+  });
+
   app.delete("/api/sku/index/:sku", requireAuth, async (req, res) => {
     try {
       const { sku } = req.params;
       const data = await dbService.getSkuIndex();
       const filtered = data.filter((item: any) => (item.sku || item.SKU)?.toString() !== sku);
       await dbService.updateSkuIndex(filtered);
+      // Explicitly remove Firestore skus/{sku} doc so paginated queries see the deletion
+      await dbService.deleteSku(sku).catch(() => {});
+      // Cascade: also remove harvest file and output JSON
+      await dbService.deleteHarvest(sku).catch(() => {});
+      await dbService.deleteOutput(sku).catch(() => {});
       res.json({ success: true });
     } catch (e) {
       res.status(500).json({ error: "Failed to delete SKU" });
@@ -1043,8 +1227,9 @@ async function startServer() {
       await context.close();
       context = null;
 
-      // Use piercedHtml if available as it includes Shadow DOM content
-      const $ = cheerio.load(piercedHtml || html);
+      // Use shadow-pierced HTML for visual body extraction, but full HTML for JSON-LD/meta.
+      const $shadow = cheerio.load(piercedHtml || html);
+      const $full = cheerio.load(html);
       let bodyHtml = "";
       
       const isJsonLd = strategy === 'JsonLdExtractionStrategy';
@@ -1053,7 +1238,7 @@ async function startServer() {
       if (isWholeCapture) {
         console.log(`[SERVER] Using Whole Capture Extraction strategy`);
         // Start from body
-        let $body = $('body');
+        let $body = $shadow('body');
         
         // Strip common noise elements
         $body.find('script, style, iframe, noscript, link, meta, style, svg').remove();
@@ -1071,18 +1256,18 @@ async function startServer() {
         bodyHtml += $body.html() || "";
       } else if (isJsonLd) {
         console.log(`[SERVER] Using JSON-LD Extraction strategy`);
-        const jsonLdScripts = $('script[type="application/ld+json"]');
+        const jsonLdScripts = $full('script[type="application/ld+json"]');
         if (jsonLdScripts.length > 0) {
           jsonLdScripts.each((i, el) => {
-            bodyHtml += `<pre>${$(el).html()}</pre>\n`;
+            bodyHtml += `<pre>${$full(el).html()}</pre>\n`;
           });
         } else {
           // Fallback to meta tags if no JSON-LD found
-          const metaTags = $('meta[property^="og:"], meta[name="description"]');
+          const metaTags = $full('meta[property^="og:"], meta[name="description"]');
           if (metaTags.length > 0) {
             metaTags.each((i, el) => {
-              const content = $(el).attr('content');
-              const name = $(el).attr('name') || $(el).attr('property');
+              const content = $full(el).attr('content');
+              const name = $full(el).attr('name') || $full(el).attr('property');
               bodyHtml += `<p><strong>${name}:</strong> ${content}</p>\n`;
             });
           }
@@ -1093,10 +1278,10 @@ async function startServer() {
       if (selector) {
         console.log(`[SERVER] Processing selector: ${selector}`);
         try {
-          const matches = $(selector);
+          const matches = $shadow(selector);
           if (matches.length > 0) {
             matches.each((i, el) => {
-              const $el = $(el);
+              const $el = $shadow(el);
               $el.find('script, style, iframe, noscript, footer, nav, .ads, .promo, .popup, .modal').remove();
               $el.find('*').removeAttr('class').removeAttr('id').removeAttr('style').removeAttr('data-test');
               bodyHtml += $el.html() + "\n";
@@ -1109,8 +1294,8 @@ async function startServer() {
           bodyHtml += `<p>Invalid CSS Selector provided: ${selector}</p>\n`;
         }
       } else if (!isJsonLd && !isWholeCapture) {
-        let contentRoot = $('main, article, #product, .product, #main-content');
-        if (contentRoot.length === 0) contentRoot = $('body');
+        let contentRoot = $shadow('main, article, #product, .product, #main-content');
+        if (contentRoot.length === 0) contentRoot = $shadow('body');
         contentRoot.find('script, style, iframe, noscript, .ads, .promo, footer, nav, .popup, .modal').remove();
         contentRoot.find('*').removeAttr('class').removeAttr('id').removeAttr('style');
         bodyHtml += contentRoot.html() || "";
@@ -1121,46 +1306,86 @@ async function startServer() {
         .replace(/\[!\[.*?\]\(.*?\)\].*?\)/g, '')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
-      // Improved Image Extraction Logic
+
+      let highQualityImageSection = "";
+
+      // Base media discovery keeps existing behavior for downstream consumers.
       const imageUrls: string[] = [];
-      const $extracted = cheerio.load(bodyHtml);
+      const $extracted = $full;
       $extracted('img').each((i, el) => {
         const src = $extracted(el).attr('src');
         const dataSrc = $extracted(el).attr('data-src');
         const srcset = $extracted(el).attr('srcset');
         const dataOldHires = $extracted(el).attr('data-old-hires');
+        const dataZoomImage = $extracted(el).attr('data-zoom-image');
+        const dataLargeImage = $extracted(el).attr('data-large-image');
         const dataDynamicImage = $extracted(el).attr('data-a-dynamic-image');
 
-        [src, dataSrc, srcset, dataOldHires].forEach(val => {
+        [src, dataSrc, dataOldHires, dataZoomImage, dataLargeImage].forEach(val => {
           if (!val) return;
-          const parts = val.split(',').map(p => p.trim().split(' ')[0]);
-          parts.forEach(imgUrl => {
-            if (!imgUrl || imgUrl.startsWith('data:')) return;
-            if (imgUrl.startsWith('//')) imgUrl = 'https:' + imgUrl;
-            else if (imgUrl.startsWith('/')) {
-              try {
-                const urlObj = new URL(url);
-                imgUrl = urlObj.origin + imgUrl;
-              } catch(e) {}
-            }
-            if (!imageUrls.includes(imgUrl)) imageUrls.push(imgUrl);
-          });
+          const normalized = normalizeImageUrl(val, url);
+          if (normalized && !imageUrls.includes(normalized)) {
+            imageUrls.push(normalized);
+          }
         });
+
+        if (srcset) {
+          extractUrlsFromSrcset(srcset).forEach((srcsetUrl) => {
+            const normalized = normalizeImageUrl(srcsetUrl, url);
+            if (normalized && !imageUrls.includes(normalized)) {
+              imageUrls.push(normalized);
+            }
+          });
+        }
         
         if (dataDynamicImage) {
            try {
               const parsed = JSON.parse(dataDynamicImage);
               Object.keys(parsed).forEach(imgUrl => {
-                 if (!imgUrl || imgUrl.startsWith('data:')) return;
-                 if (imgUrl.startsWith('//')) imgUrl = 'https:' + imgUrl;
-                 if (!imageUrls.includes(imgUrl)) imageUrls.push(imgUrl);
+                 const normalized = normalizeImageUrl(imgUrl, url);
+                 if (normalized && !imageUrls.includes(normalized)) {
+                   imageUrls.push(normalized);
+                 }
               });
            } catch(e) {}
         }
       });
 
+      const ogImage = $extracted('meta[property="og:image"]').attr('content');
+      const twitterImage = $extracted('meta[name="twitter:image"], meta[property="twitter:image"]').attr('content');
+      const itempropImage = $extracted('meta[itemprop="image"]').attr('content');
+
+      [ogImage, twitterImage, itempropImage].forEach((metaImg) => {
+        if (!metaImg) return;
+        const normalized = normalizeImageUrl(metaImg, url);
+        if (normalized && !imageUrls.includes(normalized)) {
+          imageUrls.push(normalized);
+        }
+      });
+
       if (imageUrls.length > 0) {
         markdown += "\n\n### MEDIA SOURCE ASSETS (PLAINTEXT URLs):\n" + imageUrls.join('\n');
+      }
+
+      if (isJsonLd) {
+        const jsonLdImageCandidates: string[] = [];
+        $extracted('script[type="application/ld+json"]').each((_, el) => {
+          const rawJsonLd = $extracted(el).html();
+          if (!rawJsonLd) return;
+          try {
+            const parsed = JSON.parse(rawJsonLd);
+            collectImageUrlsFromJsonLdValue(parsed, jsonLdImageCandidates);
+          } catch {
+            // Ignore malformed JSON-LD blocks and continue processing.
+          }
+        });
+
+        const trustedImageUrls = new Set(imageUrls);
+        const highQualityUrls = rankHighQualityImageUrls([...imageUrls, ...jsonLdImageCandidates], url, trustedImageUrls);
+        if (highQualityUrls.length > 0) {
+          highQualityImageSection = "## High Quality Product Image URLs\n" + highQualityUrls.join('\n');
+          markdown += "\n\n" + highQualityImageSection;
+        }
       }
 
       let groqResult = null;
@@ -1179,6 +1404,9 @@ async function startServer() {
           model: "llama-3.3-70b-versatile",
         });
         groqResult = groqResponse.choices[0]?.message?.content;
+        if (groqResult && highQualityImageSection && !groqResult.includes('## High Quality Product Image URLs')) {
+          groqResult += "\n\n" + highQualityImageSection;
+        }
       }
 
       return { markdown, groqResult, imageUrls, screenshotBase64, pageTitle, url };

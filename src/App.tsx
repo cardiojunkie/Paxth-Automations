@@ -292,6 +292,7 @@ export default function App() {
   const [harvestFileContent, setHarvestFileContent] = useState<string>('');
   const [loadingHarvestFile, setLoadingHarvestFile] = useState(false);
   const [selectedJobs, setSelectedJobs] = useState<string[]>([]);
+  const [selectedSkuIndexItems, setSelectedSkuIndexItems] = useState<string[]>([]);
   const [jobAiModels, setJobAiModels] = useState<{[sku:string]: string}>({});
   // Pagination state for the Jobs module
   const [jobsSearch, setJobsSearch] = useState('');
@@ -840,6 +841,23 @@ export default function App() {
            return normalized;
         });
 
+        // Map XLS column names to internal field names
+        const XLS_COLUMN_MAP: Record<string, string> = {
+          attributes__lulu_ean: 'ean',
+          attributes__shipping_weight: 'shipping_weight',
+          attributes__lulu_product_type: 'product_type',
+        };
+        data = (data as any[]).map(item => {
+          const mapped: any = { ...item };
+          Object.entries(XLS_COLUMN_MAP).forEach(([from, to]) => {
+            if (from in mapped) {
+              mapped[to] = mapped[from];
+              delete mapped[from];
+            }
+          });
+          return mapped;
+        });
+
         // Save to backend
         const res = await apiFetch('/api/sku/index', {
           method: 'POST',
@@ -859,18 +877,51 @@ export default function App() {
     reader.readAsBinaryString(file);
   };
 
+  const handleDownloadSkuTemplate = () => {
+    const headers = ['sku', 'base_code', 'brand', 'attributes__lulu_ean', 'attributes__shipping_weight', 'attributes__lulu_product_type', 'sap_data', 'attribute_Set'];
+    const ws = XLSX.utils.aoa_to_sheet([headers, Array(headers.length).fill('')]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'SKU Template');
+    XLSX.writeFile(wb, 'sku_index_template.xlsx');
+  };
+
   const handleSkuDelete = async (sku: string) => {
     try {
       addLog('wait', `Deleting SKU from system: ${sku}`);
       const res = await apiFetch(`/api/sku/index/${sku}`, { method: 'DELETE' });
       if (res.ok) {
         setSkuIndex(prev => prev.filter(s => (s.sku || s.SKU)?.toString() !== sku));
-        addLog('success', `SKU ${sku} purged from index.`);
+        setSelectedSkuIndexItems(prev => prev.filter(s => s !== sku));
+        addLog('success', `SKU ${sku} purged (index + harvest + output).`);
       } else {
         throw new Error('Delete failed');
       }
     } catch (e) {
       addLog('error', 'Failed to delete SKU.');
+    }
+  };
+
+  const handleBulkSkuDelete = async (skus: string[], source: 'indexer' | 'jobs') => {
+    if (skus.length === 0) return;
+    addLog('wait', `Purging ${skus.length} SKU(s)…`);
+    try {
+      const res = await apiFetch('/api/sku/index/purge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skus }),
+      });
+      if (!res.ok) throw new Error('Purge request failed');
+      const data = await res.json();
+      const deleted: number = data.deleted ?? skus.length;
+      const skuSet = new Set(skus);
+      setSkuIndex(prev => prev.filter(s => !skuSet.has((s.sku || s.SKU)?.toString() ?? '')));
+      setJobs(prev => prev.filter((j: any) => !skuSet.has((j.sku || j.SKU)?.toString() ?? '')));
+      setSelectedSkuIndexItems([]);
+      setSelectedJobs([]);
+      addLog('success', `${deleted} SKU(s) purged (index + harvest + output).`);
+      fetchJobs();
+    } catch (e: any) {
+      addLog('error', `Bulk SKU purge failed: ${e?.message ?? 'unknown error'}`);
     }
   };
 
@@ -2209,10 +2260,18 @@ export default function App() {
               </div>
 
               {indexerMode === 'upload' ? (
-                <div className="p-4 border-2 border-dashed border-white/10 rounded-xl flex flex-col items-center gap-3 text-center cursor-pointer relative group">
-                  <input type="file" onChange={handleSkuUpload} accept=".xlsx, .xls" className="absolute inset-0 opacity-0 cursor-pointer" />
-                  <Database className="w-6 h-6 text-blue-400 group-hover:scale-110 transition-transform" />
-                  <div className="text-[10px] font-bold text-white/80 uppercase">UPLOAD Master Index (.xlsx)</div>
+                <div className="space-y-2">
+                  <div className="p-4 border-2 border-dashed border-white/10 rounded-xl flex flex-col items-center gap-3 text-center cursor-pointer relative group">
+                    <input type="file" onChange={handleSkuUpload} accept=".xlsx, .xls" className="absolute inset-0 opacity-0 cursor-pointer" />
+                    <Database className="w-6 h-6 text-blue-400 group-hover:scale-110 transition-transform" />
+                    <div className="text-[10px] font-bold text-white/80 uppercase">UPLOAD Master Index (.xlsx)</div>
+                  </div>
+                  <button
+                    onClick={handleDownloadSkuTemplate}
+                    className="w-full py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 hover:text-white/80 rounded text-[9px] font-bold uppercase tracking-widest transition-all"
+                  >
+                    ↓ Download Template
+                  </button>
                 </div>
               ) : (
                 <div className="space-y-3 bg-white/5 p-4 rounded-xl border border-white/10">
@@ -2310,19 +2369,60 @@ export default function App() {
                 </div>
               )}
 
+              {/* Bulk delete action bar */}
+              {selectedSkuIndexItems.length > 0 && (
+                <div className="flex items-center justify-between px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg">
+                  <span className="text-[9px] font-bold text-red-400 uppercase tracking-widest">{selectedSkuIndexItems.length} selected</span>
+                  <button
+                    onClick={() => handleBulkSkuDelete(selectedSkuIndexItems, 'indexer')}
+                    className="px-3 py-1 bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold uppercase rounded transition-all"
+                  >
+                    Delete Selected
+                  </button>
+                </div>
+              )}
+
               <div className="space-y-2 max-h-[400px] overflow-y-auto custom-scrollbar pr-2">
+                 {/* Select all row */}
+                 {skuIndex.length > 0 && (
+                   <div className="flex items-center gap-2 px-1 pb-1 border-b border-white/5">
+                     <input
+                       type="checkbox"
+                       className="w-3 h-3 cursor-pointer accent-red-500"
+                       checked={selectedSkuIndexItems.length === skuIndex.length}
+                       onChange={(e) => {
+                         if (e.target.checked) setSelectedSkuIndexItems(skuIndex.map((s: any) => (s.sku || s.SKU)?.toString() ?? ''));
+                         else setSelectedSkuIndexItems([]);
+                       }}
+                     />
+                     <span className="text-[8px] uppercase text-white/20 tracking-widest">Select All</span>
+                   </div>
+                 )}
                  <input type="file" className="hidden" ref={pdfInputRef} accept="application/pdf" onChange={handlePdfFileChange} />
                  {skuIndex.map((s: any, i: number) => {
                    const skuValue = s.sku || s.SKU;
                    const hasPdf = !!s.pdf_text;
+                   const isChecked = selectedSkuIndexItems.includes(skuValue?.toString() ?? '');
                    return (
-                     <div key={i} className="p-2 bg-white/5 border border-white/5 rounded text-[10px] font-mono flex justify-between items-center group">
-                        <div className="flex flex-col">
-                          <span className="text-blue-400 font-bold flex items-center gap-2">
-                            {skuValue}
-                            {hasPdf && <span title="PDF Context Attached"><FileText className="w-3 h-3 text-cyan-400" /></span>}
-                          </span>
-                          <span className="text-white/20 text-[8px] uppercase">{s.brand || s.Brand || 'Generic'}</span>
+                     <div key={i} className={`p-2 border rounded text-[10px] font-mono flex justify-between items-center group transition-colors ${isChecked ? 'bg-red-500/10 border-red-500/30' : 'bg-white/5 border-white/5'}`}>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            className="w-3 h-3 cursor-pointer accent-red-500 flex-shrink-0"
+                            checked={isChecked}
+                            onChange={(e) => {
+                              const v = skuValue?.toString() ?? '';
+                              if (e.target.checked) setSelectedSkuIndexItems(prev => [...prev, v]);
+                              else setSelectedSkuIndexItems(prev => prev.filter(x => x !== v));
+                            }}
+                          />
+                          <div className="flex flex-col">
+                            <span className="text-blue-400 font-bold flex items-center gap-2">
+                              {skuValue}
+                              {hasPdf && <span title="PDF Context Attached"><FileText className="w-3 h-3 text-cyan-400" /></span>}
+                            </span>
+                            <span className="text-white/20 text-[8px] uppercase">{s.brand || s.Brand || 'Generic'}</span>
+                          </div>
                         </div>
                         <div className="flex items-center gap-2">
                            <div className="text-right mr-2">
@@ -3054,6 +3154,14 @@ export default function App() {
                     </div>
                     <div className="flex gap-3">
                         <button onClick={() => fetchJobs()} className="px-5 py-2.5 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-bold transition-all flex items-center gap-2 border border-white/10"><Activity className="w-3.5 h-3.5" /> RE-SYNC</button>
+                        {selectedJobs.length > 0 && (
+                          <button
+                            onClick={() => handleBulkSkuDelete(selectedJobs, 'jobs')}
+                            className="px-5 py-2.5 bg-red-600 hover:bg-red-500 rounded-lg text-xs font-bold text-white shadow-lg shadow-red-900/20 transition-all flex items-center gap-2"
+                          >
+                            <X className="w-3.5 h-3.5" /> DELETE ({selectedJobs.length})
+                          </button>
+                        )}
                         <button onClick={() => {
                           const query = selectedJobs.length > 0 ? `?skus=${selectedJobs.join(',')}` : '';
                           window.open(`/api/outputs/xlsx${query}`)
@@ -3088,10 +3196,10 @@ export default function App() {
                            <input 
                              type="checkbox" 
                              className="w-3 h-3 cursor-pointer outline-none accent-blue-500"
-                             checked={jobs.length > 0 && selectedJobs.length === jobs.filter(j => j.status === 'completed').length}
+                             checked={jobs.length > 0 && selectedJobs.length === jobs.length}
                              onChange={(e) => {
                                 if (e.target.checked) {
-                                  setSelectedJobs(jobs.filter(j => j.status === 'completed').map(j => j.sku));
+                                  setSelectedJobs(jobs.map(j => j.sku));
                                 } else {
                                   setSelectedJobs([]);
                                 }
@@ -3109,17 +3217,15 @@ export default function App() {
                          {jobs.map((job, idx) => (
                             <div key={idx} className="grid grid-cols-[1fr_8fr_8fr_6fr_5fr_4fr_4fr] h-14 border-b border-white/[0.03] hover:bg-white/[0.02] items-center px-6 transition-colors">
                                <div className="flex items-center">
-                                 {job.status === 'completed' && (
-                                   <input 
-                                     type="checkbox" 
-                                     className="w-3 h-3 cursor-pointer outline-none accent-blue-500"
-                                     checked={selectedJobs.includes(job.sku)}
-                                     onChange={(e) => {
-                                        if(e.target.checked) setSelectedJobs(p => [...p, job.sku]);
-                                        else setSelectedJobs(p => p.filter(s => s !== job.sku));
-                                     }}
-                                   />
-                                 )}
+                                 <input 
+                                   type="checkbox" 
+                                   className="w-3 h-3 cursor-pointer outline-none accent-blue-500"
+                                   checked={selectedJobs.includes(job.sku)}
+                                   onChange={(e) => {
+                                      if(e.target.checked) setSelectedJobs(p => [...p, job.sku]);
+                                      else setSelectedJobs(p => p.filter(s => s !== job.sku));
+                                   }}
+                                 />
                                </div>
                                <div className="text-[11px] font-mono text-blue-500 font-bold">{job.sku}</div>
                                <div className="text-[11px] font-medium text-white/80 truncate pr-6">{job.title || 'Unknown Product Entity'}</div>
