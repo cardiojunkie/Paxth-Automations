@@ -85,11 +85,13 @@ interface ScrapeTargetData {
 
 interface ScrapeResult {
   markdown: string;
+  rawMarkdown?: string | null;
   groqResult?: string | null;
   imageUrls: string[];
   screenshotBase64?: string | null;
   pageTitle: string | null;
   url: string;
+  strategy?: ScrapeTargetData['strategy'];
 }
 
 // Keep flexible typing due to CloakBrowser/Playwright incompatibilities
@@ -262,6 +264,67 @@ function rankHighQualityImageUrls(rawUrls: string[], pageUrl: string, trustedUrl
     .map(([url]) => url);
 }
 
+function extractHarvestImageSections(markdown: string): string[] {
+  const headings = new Set([
+    '### MEDIA SOURCE ASSETS (PLAINTEXT URLs):',
+    '## High Quality Product Image URLs',
+  ]);
+  const lines = markdown.split(/\r?\n/);
+  const sections: string[] = [];
+  let activeHeading: string | null = null;
+  let activeLines: string[] = [];
+
+  const flush = () => {
+    if (!activeHeading) return;
+    const section = [activeHeading, ...activeLines].join('\n').trim();
+    if (section !== activeHeading) {
+      sections.push(section);
+    }
+    activeHeading = null;
+    activeLines = [];
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (headings.has(trimmed)) {
+      flush();
+      activeHeading = trimmed;
+      continue;
+    }
+
+    if (activeHeading && /^#{1,6}\s/.test(trimmed)) {
+      flush();
+    }
+
+    if (activeHeading) {
+      activeLines.push(line);
+    }
+  }
+
+  flush();
+  return sections;
+}
+
+function ensureHarvestImageSections(preferredMarkdown: string | null | undefined, sourceMarkdown: string): string {
+  const fallback = sourceMarkdown.trim();
+  if (!preferredMarkdown?.trim()) {
+    return fallback;
+  }
+
+  const preferred = preferredMarkdown.trim();
+  if (extractHarvestImageSections(preferred).length > 0) {
+    return preferred;
+  }
+
+  const fallbackSections = extractHarvestImageSections(fallback);
+  if (fallbackSections.length === 0) {
+    return preferred;
+  }
+
+  return `${preferred}\n\n${fallbackSections.join('\n\n')}`.trim();
+}
+
 // isPrivateIpAddress and assertSafeTargetUrl imported from src/server/ssrf.ts
 
 // Global Uncaught Exception Handlers to prevent server crash
@@ -301,6 +364,57 @@ const buildGroqClient = (apiKey?: string | null) => {
 const groq = buildGroqClient(process.env.GROQ_API_KEY);
 
 // All Zod schemas are imported from src/server/schemas.ts
+
+function sanitizeWholeCaptureRoot($root: any, mode: 'raw' | 'structured') {
+  $root.find('script, style, iframe, noscript, link, meta, svg, canvas, template').remove();
+
+  if (mode === 'structured') {
+    $root.find('[role="dialog"], [aria-modal="true"], .cookie-banner, .cookies, #cookie-banner, #onetrust-banner-sdk, .newsletter, .popup, .modal, .chat-widget, .intercom-lightweight-app').remove();
+  }
+
+  $root
+    .find('*')
+    .removeAttr('class')
+    .removeAttr('id')
+    .removeAttr('style')
+    .removeAttr('data-test')
+    .removeAttr('data-testid')
+    .removeAttr('data-qa');
+}
+
+function convertHtmlToMarkdown(html: string): string {
+  return turndownService.turndown(html)
+    .replace(/!\[.*?\]\(.*?\)/g, '')
+    .replace(/\[!\[.*?\]\(.*?\)\].*?\)/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function buildWholeCaptureDocument({
+  pageTitle,
+  url,
+  sectionTitle,
+  contentMarkdown,
+}: {
+  pageTitle: string | null;
+  url: string;
+  sectionTitle: string;
+  contentMarkdown: string;
+}): string {
+  const trimmedContent = contentMarkdown.trim();
+
+  return [
+    pageTitle?.trim() ? `# ${pageTitle.trim()}` : '# Whole Capture',
+    '',
+    '## Source Metadata',
+    `- URL: ${url}`,
+    '- Strategy: WholeCaptureStrategy',
+    '',
+    `## ${sectionTitle}`,
+    '',
+    trimmedContent || '_No content captured._',
+  ].join('\n').trim();
+}
 
 async function startServer() {
   const app = express();
@@ -543,10 +657,28 @@ async function startServer() {
     if (sku) {
       const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
       try {
+        const shouldPreferGroqPrimary = strategy === 'GroqExtractionStrategy';
+        const primaryHarvestContent = shouldPreferGroqPrimary
+          ? ensureHarvestImageSections(primaryResult.groqResult, primaryResult.markdown)
+          : primaryResult.markdown;
+        const primaryRawHarvestContent = primaryResult.rawMarkdown
+          ? ensureHarvestImageSections(primaryResult.rawMarkdown, primaryResult.markdown)
+          : undefined;
+        const shouldPreferGroqSecondary = secondaryResult?.strategy === 'GroqExtractionStrategy';
+        const secondaryHarvestContent = secondaryResult
+          ? (shouldPreferGroqSecondary
+              ? ensureHarvestImageSections(secondaryResult.groqResult, secondaryResult.markdown)
+              : secondaryResult.markdown)
+          : undefined;
+        const secondaryRawHarvestContent = secondaryResult?.rawMarkdown
+          ? ensureHarvestImageSections(secondaryResult.rawMarkdown, secondaryResult.markdown)
+          : undefined;
         await dbService.saveHarvest(
           safeSku,
-          primaryResult.groqResult || primaryResult.markdown,
-          secondaryResult ? (secondaryResult.groqResult || secondaryResult.markdown) : undefined
+          primaryHarvestContent,
+          secondaryHarvestContent,
+          primaryRawHarvestContent,
+          secondaryRawHarvestContent,
         );
         console.log(`[SCRAPE] Auto-saved harvest: ${safeSku}`);
       } catch (e: any) {
@@ -557,17 +689,21 @@ async function startServer() {
     return {
       success: true,
       text: primaryResult.markdown,
+      rawText: primaryResult.rawMarkdown,
       groqResult: primaryResult.groqResult,
       imageUrls: primaryResult.imageUrls,
       title: primaryResult.pageTitle,
       url: primaryResult.url,
+      strategy: primaryResult.strategy,
       ...(primaryResult.screenshotBase64 ? { screenshot: `data:image/jpeg;base64,${primaryResult.screenshotBase64}` } : {}),
       secondary: secondaryResult ? {
         url: secondaryResult.url,
         text: secondaryResult.markdown,
+        rawText: secondaryResult.rawMarkdown,
         groqResult: secondaryResult.groqResult,
         imageUrls: secondaryResult.imageUrls,
         title: secondaryResult.pageTitle,
+        strategy: secondaryResult.strategy,
         ...(secondaryResult.screenshotBase64 ? { screenshot: `data:image/jpeg;base64,${secondaryResult.screenshotBase64}` } : {}),
       } : null,
     };
@@ -932,8 +1068,7 @@ async function startServer() {
   app.get("/api/harvest/:filename", requireAuth, async (req, res) => {
     try {
       const { filename } = req.params;
-      const sku = filename.replace('.md', '');
-      const content = await dbService.getHarvest(sku);
+      const content = await dbService.getHarvestFile(filename);
       if (content) {
         res.json({ content });
       } else {
@@ -944,10 +1079,31 @@ async function startServer() {
     }
   });
 
+  app.put("/api/harvest/:filename", requireAuth, async (req, res) => {
+    try {
+      const { filename } = req.params;
+      const { content } = req.body;
+
+      if (typeof content !== 'string') {
+        return res.status(400).json({ error: 'content is required' });
+      }
+
+      await dbService.saveHarvestFile(filename, content);
+      res.json({ success: true, filename });
+    } catch (e) {
+      res.status(500).json({ error: 'Save failed' });
+    }
+  });
+
   app.delete("/api/harvest/:filename", requireAuth, async (req, res) => {
     try {
       const { filename } = req.params;
-      const sku = filename.replace('.md', '');
+      const sku = path
+        .basename(filename)
+        .replace(/_secondary_raw\.md$/i, '')
+        .replace(/_secondary\.md$/i, '')
+        .replace(/_raw\.md$/i, '')
+        .replace(/\.md$/i, '');
       await dbService.deleteHarvest(sku);
       res.json({ success: true });
     } catch (e) {
@@ -1231,29 +1387,30 @@ async function startServer() {
       const $shadow = cheerio.load(piercedHtml || html);
       const $full = cheerio.load(html);
       let bodyHtml = "";
+      let rawBodyHtml = "";
       
       const isJsonLd = strategy === 'JsonLdExtractionStrategy';
       const isWholeCapture = strategy === 'WholeCaptureStrategy';
 
       if (isWholeCapture) {
         console.log(`[SERVER] Using Whole Capture Extraction strategy`);
-        // Start from body
-        let $body = $shadow('body');
-        
-        // Strip common noise elements
-        $body.find('script, style, iframe, noscript, link, meta, style, svg').remove();
-        $body.find('header, footer, nav, .footer, .header, .navbar, .menu, #header, #footer').remove();
-        $body.find('.related-products, .recommendations, .similar-products, .also-bought').remove();
-        $body.find('.price, .pricing, .discount, .compare-at-price, .currency').remove();
-        $body.find('.ads, .promo, .popup, .modal, .cookie-banner, .newsletter').remove();
-        
-        // Remove most common irrelevant links / buttons but keep structural data
-        $body.find('a[href="#"], button:contains("Add to Cart"), button:contains("Buy Now")').remove();
+        const wholeCaptureSourceHtml = piercedHtml || html;
 
-        // Strip attributes for cleaner markdown
-        $body.find('*').removeAttr('class').removeAttr('id').removeAttr('style').removeAttr('data-test');
-        
-        bodyHtml += $body.html() || "";
+        const $rawWhole = cheerio.load(wholeCaptureSourceHtml);
+        let $rawBody: any = $rawWhole('body').first();
+        if ($rawBody.length === 0) {
+          $rawBody = $rawWhole.root() as any;
+        }
+        sanitizeWholeCaptureRoot($rawBody, 'raw');
+        rawBodyHtml = $rawBody.html() || wholeCaptureSourceHtml;
+
+        const $structuredWhole = cheerio.load(wholeCaptureSourceHtml);
+        let $structuredBody: any = $structuredWhole('body').first();
+        if ($structuredBody.length === 0) {
+          $structuredBody = $structuredWhole.root() as any;
+        }
+        sanitizeWholeCaptureRoot($structuredBody, 'structured');
+        bodyHtml = $structuredBody.html() || rawBodyHtml;
       } else if (isJsonLd) {
         console.log(`[SERVER] Using JSON-LD Extraction strategy`);
         const jsonLdScripts = $full('script[type="application/ld+json"]');
@@ -1275,7 +1432,7 @@ async function startServer() {
         }
       }
       
-      if (selector) {
+      if (selector && !isWholeCapture) {
         console.log(`[SERVER] Processing selector: ${selector}`);
         try {
           const matches = $shadow(selector);
@@ -1293,6 +1450,8 @@ async function startServer() {
           console.warn(`[SERVER] Invalid selector provided or error parsing selector: ${err.message}`);
           bodyHtml += `<p>Invalid CSS Selector provided: ${selector}</p>\n`;
         }
+      } else if (selector && isWholeCapture) {
+        console.log(`[SERVER] Ignoring selector narrowing for Whole Capture strategy: ${selector}`);
       } else if (!isJsonLd && !isWholeCapture) {
         let contentRoot = $shadow('main, article, #product, .product, #main-content');
         if (contentRoot.length === 0) contentRoot = $shadow('body');
@@ -1301,11 +1460,8 @@ async function startServer() {
         bodyHtml += contentRoot.html() || "";
       }
 
-      let markdown = turndownService.turndown(bodyHtml)
-        .replace(/!\[.*?\]\(.*?\)/g, '') 
-        .replace(/\[!\[.*?\]\(.*?\)\].*?\)/g, '')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
+      let markdown = convertHtmlToMarkdown(bodyHtml);
+      let rawMarkdown = isWholeCapture ? convertHtmlToMarkdown(rawBodyHtml || bodyHtml) : null;
 
       let highQualityImageSection = "";
 
@@ -1365,6 +1521,9 @@ async function startServer() {
 
       if (imageUrls.length > 0) {
         markdown += "\n\n### MEDIA SOURCE ASSETS (PLAINTEXT URLs):\n" + imageUrls.join('\n');
+        if (rawMarkdown) {
+          rawMarkdown += "\n\n### MEDIA SOURCE ASSETS (PLAINTEXT URLs):\n" + imageUrls.join('\n');
+        }
       }
 
       if (isJsonLd) {
@@ -1388,6 +1547,21 @@ async function startServer() {
         }
       }
 
+      if (isWholeCapture) {
+        markdown = buildWholeCaptureDocument({
+          pageTitle,
+          url,
+          sectionTitle: 'Structured Page Capture',
+          contentMarkdown: markdown,
+        });
+        rawMarkdown = buildWholeCaptureDocument({
+          pageTitle,
+          url,
+          sectionTitle: 'Raw Page Capture',
+          contentMarkdown: rawMarkdown || markdown,
+        });
+      }
+
       let groqResult = null;
       if (extractWithGroq && markdown && groq) {
         const groqResponse = await groq.chat.completions.create({
@@ -1409,7 +1583,7 @@ async function startServer() {
         }
       }
 
-      return { markdown, groqResult, imageUrls, screenshotBase64, pageTitle, url };
+      return { markdown, rawMarkdown, groqResult, imageUrls, screenshotBase64, pageTitle, url, strategy };
     } catch (error: any) {
       if (context) {
         try {
@@ -1934,7 +2108,6 @@ async function startServer() {
 
     return groq;
   }
-
   // Public liveness/readiness probe — no auth required, safe for platform health checks
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, status: 'ok', ts: Date.now() });

@@ -15,7 +15,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "smoke": "tsx scripts/smoke-test.ts"
+    "smoke": "tsx scripts/smoke-test.ts",
+    "smoke:whole-capture": "tsx scripts/whole-capture-smoke.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",

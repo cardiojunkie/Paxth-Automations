@@ -172,12 +172,15 @@ export interface DiscoveredLink {
 
 export interface ScrapeResponse {
   text: string;
+  rawText?: string | null;
   groqResult?: string | null;
   imageUrls?: string[];
   screenshot?: string | null;
   title?: string | null;
+  strategy?: string;
   secondary?: {
     text: string;
+    rawText?: string | null;
     groqResult?: string | null;
     title?: string | null;
     strategy?: string;

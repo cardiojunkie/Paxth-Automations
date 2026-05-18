@@ -42,8 +42,97 @@ interface AllowlistUser {
   addedAt?: string | null;
 }
 
+interface BatchManifestRow {
+  sku: string;
+  url: string;
+}
+
+interface SelectedHarvestImageSource {
+  filename: string;
+  sku: string;
+  content: string;
+  urls: string[];
+}
+
+interface HarvestEditorEntry {
+  filename: string;
+  sku: string;
+  content: string;
+  sourceLabel: string;
+  openedAt: string;
+}
+
 const SCRAPE_JOB_POLL_TIMEOUT_MS = 600_000;
 const DISCOVERY_JOB_POLL_TIMEOUT_MS = 120_000;
+const BATCH_TEMPLATE_HEADERS = ['sku', 'url'];
+const HARVEST_IMAGE_SECTION_HEADINGS = new Set([
+  '### MEDIA SOURCE ASSETS (PLAINTEXT URLs):',
+  '## High Quality Product Image URLs',
+]);
+
+function deriveHarvestSku(filename: string): string {
+  return filename
+    .replace(/_secondary_raw\.md$/i, '')
+    .replace(/_secondary\.md$/i, '')
+    .replace(/_raw\.md$/i, '')
+    .replace(/\.md$/i, '');
+}
+
+function formatScrapePreview(title: string | null | undefined, strategyName: string, text: string | null | undefined): string {
+  const trimmed = text?.trim();
+  if (!trimmed) {
+    return 'No content captured.';
+  }
+
+  if (strategyName === 'WholeCaptureStrategy') {
+    return trimmed;
+  }
+
+  return `# ${title || 'Captured Page'}\n\nRAW DATA PREVIEW (${strategyName}):\n\n${trimmed}`;
+}
+
+function extractHarvestImageUrls(content: string): string[] {
+  const sectionUrls = new Set<string>();
+  const lines = content.split(/\r?\n/);
+  let activeSection = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+
+    if (HARVEST_IMAGE_SECTION_HEADINGS.has(trimmed)) {
+      activeSection = true;
+      continue;
+    }
+
+    if (activeSection && /^#{1,6}\s/.test(trimmed)) {
+      activeSection = false;
+    }
+
+    if (!activeSection || !trimmed) {
+      continue;
+    }
+
+    const matches = trimmed.match(/https?:\/\/[^\s)"']+/gi) || [];
+    matches.forEach((match) => sectionUrls.add(match));
+  }
+
+  if (sectionUrls.size > 0) {
+    return Array.from(sectionUrls);
+  }
+
+  const fallbackMatches = content.match(/https?:\/\/[^\s)"']+\.(?:jpg|jpeg|png|webp|gif|avif|bmp|jfif)(?:\?[^\s)"']*)?/gi) || [];
+  return Array.from(new Set(fallbackMatches));
+}
+
+function createHarvestEditorEntry(filename: string, content: string, sourceLabel: string): HarvestEditorEntry {
+  return {
+    filename,
+    sku: deriveHarvestSku(filename),
+    content,
+    sourceLabel,
+    openedAt: new Date().toISOString(),
+  };
+}
 
 
 /**
@@ -139,7 +228,7 @@ export default function App() {
   const [url, setUrl] = useState('');
   const [batchFile, setBatchFile] = useState<File | null>(null);
   const [skuFile, setSkuFile] = useState<File | null>(null);
-  const [batchData, setBatchData] = useState<SkuRecord[]>([]);
+  const [batchData, setBatchData] = useState<BatchManifestRow[]>([]);
   const [strategy, setStrategy] = useState('JsonLdExtractionStrategy');
   const [selector, setSelector] = useState('');
   
@@ -289,7 +378,13 @@ export default function App() {
   const [selectedImageUrls, setSelectedImageUrls] = useState<string[]>([]);
   const [isExportingImages, setIsExportingImages] = useState(false);
   const [imageExportError, setImageExportError] = useState<string | null>(null);
-  const [harvestFileContent, setHarvestFileContent] = useState<string>('');
+  const [selectedHarvestSource, setSelectedHarvestSource] = useState<SelectedHarvestImageSource | null>(null);
+  const [primaryHarvestEntries, setPrimaryHarvestEntries] = useState<HarvestEditorEntry[]>([]);
+  const [activeHarvestEntryFilename, setActiveHarvestEntryFilename] = useState<string | null>(null);
+  const [editingHarvestFilename, setEditingHarvestFilename] = useState<string | null>(null);
+  const [editedHarvestContent, setEditedHarvestContent] = useState('');
+  const [isSavingHarvestEntry, setIsSavingHarvestEntry] = useState(false);
+  const [harvestSaveError, setHarvestSaveError] = useState<string | null>(null);
   const [loadingHarvestFile, setLoadingHarvestFile] = useState(false);
   const [selectedJobs, setSelectedJobs] = useState<string[]>([]);
   const [selectedSkuIndexItems, setSelectedSkuIndexItems] = useState<string[]>([]);
@@ -567,21 +662,21 @@ export default function App() {
     setImageExportError(null);
     try {
       const res = await apiFetch(`/api/harvest/${encodeURIComponent(filename)}`);
-      if (!res.ok) throw new Error('Failed to load harvest file');
-      const content = await res.text();
-      setHarvestFileContent(content);
-      
-      // Extract image URLs from markdown (http/https URLs)
-      const urlPattern = /https?:\/\/[^\s\)]+\.(?:jpg|jpeg|png|webp|gif)/gi;
-      const urls = (content.match(urlPattern) || []).map(url => url.trim()).filter((url, idx, arr) => arr.indexOf(url) === idx);
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.content) throw new Error(payload?.error || 'Failed to load harvest file');
+      const content = payload.content as string;
+      const urls = extractHarvestImageUrls(content);
       
       if (urls.length === 0) {
         throw new Error('No image URLs found in harvest file');
       }
       
+      const derivedSku = deriveHarvestSku(filename);
+      setSelectedHarvestSource({ filename, sku: derivedSku, content, urls });
       setImageUrls(urls);
+      setImageSku(derivedSku);
       setSelectedImageUrls([]);
-      addLog('success', `Loaded ${urls.length} image URLs from harvest file.`);
+      addLog('success', `Loaded ${urls.length} image URLs from ${filename}.`);
     } catch (error: any) {
       const msg = error?.message || 'Failed to load harvest file';
       setImageExportError(msg);
@@ -729,22 +824,68 @@ export default function App() {
         const wb = XLSX.read(bstr, { type: 'binary' });
         const wsname = wb.SheetNames[0];
         const ws = wb.Sheets[wsname];
-        const data = XLSX.utils.sheet_to_json(ws) as any[];
-        
-        // Expecting columns "SKU" and "URL" (case insensitive)
-        const parsed = data.map(row => {
-          const skuKey = Object.keys(row).find(k => k.toLowerCase() === 'sku');
-          const urlKey = Object.keys(row).find(k => k.toLowerCase() === 'url');
-          return {
-            sku: skuKey ? row[skuKey] : '',
-            url: urlKey ? row[urlKey] : ''
-          };
-        }).filter(item => item.sku && item.url);
-        
+        const rows = XLSX.utils.sheet_to_json<(string | number | boolean | null)[]>(ws, {
+          header: 1,
+          defval: '',
+        }) as (string | number | boolean | null)[][];
+
+        if (rows.length === 0) {
+          throw new Error('The manifest is empty.');
+        }
+
+        const headerRow = rows[0].map((cell) => cell?.toString().trim().toLowerCase());
+        const skuIndex = headerRow.indexOf('sku');
+        const urlIndex = headerRow.indexOf('url');
+
+        if (skuIndex === -1 || urlIndex === -1) {
+          throw new Error('The manifest must include sku and url headers.');
+        }
+
+        const parsed: BatchManifestRow[] = [];
+        const invalidRows: number[] = [];
+
+        rows.slice(1).forEach((row, idx) => {
+          const sku = row[skuIndex]?.toString().trim() || '';
+          const itemUrl = row[urlIndex]?.toString().trim() || '';
+          const rowIsEmpty = row.every((cell) => !cell?.toString().trim());
+
+          if (rowIsEmpty) return;
+
+          if (!sku || !itemUrl) {
+            invalidRows.push(idx + 2);
+            return;
+          }
+
+          parsed.push({ sku, url: itemUrl });
+        });
+
+        if (invalidRows.length > 0) {
+          throw new Error(`Rows ${invalidRows.join(', ')} are missing a sku or url value.`);
+        }
+
+        if (parsed.length === 0) {
+          throw new Error('No valid sku/url rows were found in the manifest.');
+        }
+
+        const seenSkus = new Set<string>();
+        const duplicateSkus: string[] = [];
+        parsed.forEach((item) => {
+          if (seenSkus.has(item.sku) && !duplicateSkus.includes(item.sku)) {
+            duplicateSkus.push(item.sku);
+            return;
+          }
+          seenSkus.add(item.sku);
+        });
+
+        if (duplicateSkus.length > 0) {
+          throw new Error(`Duplicate sku values are not allowed: ${duplicateSkus.join(', ')}`);
+        }
+
         setBatchData(parsed);
         addLog('success', `Loaded ${parsed.length} items from batch file.`);
-      } catch (err) {
-        addLog('error', 'Failed to parse Excel file. Ensure columns are "SKU" and "URL".');
+      } catch (err: any) {
+        setBatchData([]);
+        addLog('error', err?.message || 'Failed to parse Excel file. Ensure columns are sku and url.');
       }
     };
     reader.readAsBinaryString(file);
@@ -753,6 +894,10 @@ export default function App() {
   const handleBatchScrape = async () => {
     if (isScraping || batchData.length === 0) return;
     setIsScraping(true);
+    setActiveHarvestEntryFilename(null);
+    setEditingHarvestFilename(null);
+    setEditedHarvestContent('');
+    setHarvestSaveError(null);
     addLog('system', `Initiating Batch Harvest [${batchData.length} items]...`);
     setProgress(1);
 
@@ -785,26 +930,24 @@ export default function App() {
           }
           
           const { jobId } = await startRes.json();
+          addLog('network', `[${globalIdx + 1}/${batchData.length}] Queued ${item.sku} (${jobId})`);
           
           // Step 2: poll until done
           const data = await pollJob(jobId, SCRAPE_JOB_POLL_TIMEOUT_MS);
-          
-          let report = "";
+
           if (strategy === 'LLMExtractionStrategy') {
             addLog('error', 'Advanced Extraction Strategy is currently suspended for deployment. Please use Groq Strategy.');
-            throw new Error("Advanced Strategy Suspended");
-          } else {
-            report = data.groqResult || data.text;
+            throw new Error('Advanced Strategy Suspended');
           }
 
-          // Save to backend
-          await apiFetch('/api/save-batch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ sku: item.sku, content: report })
-          });
+          if (!(data.groqResult || data.text)) {
+            throw new Error('Scrape completed without harvest content.');
+          }
 
-          addLog('success', `[${globalIdx + 1}/${batchData.length}] Saved: ${item.sku}`);
+          const safeSku = item.sku.toString().replace(/[^a-z0-9_-]/gi, '_');
+          await syncHarvestEntryFromServer(`${safeSku}.md`, 'batch harvest');
+
+          addLog('success', `[${globalIdx + 1}/${batchData.length}] Saved: ${item.sku}.md`);
         } catch (err: any) {
           addLog('error', `[${globalIdx + 1}/${batchData.length}] Failed ${item.sku}: ${err.message}`);
         }
@@ -814,6 +957,10 @@ export default function App() {
       setProgress(Math.round(((i + currentBatch.length) / batchData.length) * 100));
     }
 
+    await Promise.all([
+      fetchHarvest(),
+      fetchJobs(),
+    ]);
     addLog('success', 'Batch Harvest complete. All files saved to backend /harvest folder.');
     setIsScraping(false);
     setProgress(100);
@@ -885,6 +1032,13 @@ export default function App() {
     XLSX.writeFile(wb, 'sku_index_template.xlsx');
   };
 
+  const handleDownloadBatchTemplate = () => {
+    const ws = XLSX.utils.aoa_to_sheet([BATCH_TEMPLATE_HEADERS, Array(BATCH_TEMPLATE_HEADERS.length).fill('')]);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Batch Manifest');
+    XLSX.writeFile(wb, 'batch_manifest_template.xlsx');
+  };
+
   const handleSkuDelete = async (sku: string) => {
     try {
       addLog('wait', `Deleting SKU from system: ${sku}`);
@@ -930,12 +1084,41 @@ export default function App() {
       addLog('wait', `Purging harvest file: ${filename}`);
       const res = await apiFetch(`/api/harvest/${filename}`, { method: 'DELETE' });
       if (res.ok) {
+        setPrimaryHarvestEntries((prev) => prev.filter((entry) => entry.filename !== filename));
+        if (activeHarvestEntryFilename === filename) {
+          setActiveHarvestEntryFilename(null);
+          setIsModalOpen(false);
+        }
+        if (editingHarvestFilename === filename) {
+          setEditingHarvestFilename(null);
+          setEditedHarvestContent('');
+          setHarvestSaveError(null);
+        }
+        if (selectedHarvestSource?.filename === filename) {
+          setSelectedHarvestSource(null);
+          setImageUrls([]);
+          setSelectedImageUrls([]);
+        }
         addLog('success', 'Harvest deleted.');
         fetchJobs();
         fetchHarvest();
       }
     } catch (e) {
       addLog('error', 'Harvest purge failed.');
+    }
+  };
+
+  const openHarvestFile = async (filename: string, sourceLabel = 'harvest archive') => {
+    try {
+      await syncHarvestEntryFromServer(filename, sourceLabel);
+      setExtractionResult2(null);
+      setIsModalOpen(true);
+      if (sourceLabel === 'harvest archive') {
+        setShowHarvestModal(false);
+      }
+      addLog('action', `Opening ${sourceLabel}: ${filename}`);
+    } catch (error: any) {
+      addLog('error', error?.message || 'Failed to load harvest file.');
     }
   };
 
@@ -1087,6 +1270,99 @@ export default function App() {
     setLogs(prev => [...prev, { type, message, timestamp: new Date().toLocaleTimeString() }]);
   };
 
+  const activeHarvestEntry = activeHarvestEntryFilename
+    ? primaryHarvestEntries.find((entry) => entry.filename === activeHarvestEntryFilename) ?? null
+    : null;
+  const modalHarvestContent = activeHarvestEntry?.content ?? extractionResult;
+  const isEditingActiveHarvestEntry = !!activeHarvestEntry && editingHarvestFilename === activeHarvestEntry.filename;
+
+  async function fetchHarvestFileContent(filename: string): Promise<string> {
+    const res = await apiFetch(`/api/harvest/${encodeURIComponent(filename)}`);
+    const payload = await res.json().catch(() => null);
+    if (!res.ok || !payload?.content) {
+      throw new Error(payload?.error || 'Failed to load harvest file');
+    }
+    return payload.content as string;
+  }
+
+  function upsertPrimaryHarvestEntry(entry: HarvestEditorEntry, focus = true) {
+    setPrimaryHarvestEntries((prev) => {
+      const next = prev.filter((item) => item.filename !== entry.filename);
+      return [entry, ...next];
+    });
+    if (focus) {
+      setActiveHarvestEntryFilename(entry.filename);
+    }
+  }
+
+  async function syncHarvestEntryFromServer(filename: string, sourceLabel: string, focus = true) {
+    const content = await fetchHarvestFileContent(filename);
+    const entry = createHarvestEditorEntry(filename, content, sourceLabel);
+    upsertPrimaryHarvestEntry(entry, focus);
+    return entry;
+  }
+
+  function handleEditSavedHarvest(filename: string) {
+    const entry = primaryHarvestEntries.find((item) => item.filename === filename);
+    if (!entry) return;
+
+    setActiveHarvestEntryFilename(filename);
+    setEditingHarvestFilename(filename);
+    setEditedHarvestContent(entry.content);
+    setHarvestSaveError(null);
+  }
+
+  function handleCancelSavedHarvestEdit() {
+    setEditingHarvestFilename(null);
+    setEditedHarvestContent('');
+    setHarvestSaveError(null);
+  }
+
+  async function handleSaveSavedHarvest(filename: string) {
+    const existingEntry = primaryHarvestEntries.find((item) => item.filename === filename);
+    if (!existingEntry) return;
+
+    setIsSavingHarvestEntry(true);
+    setHarvestSaveError(null);
+
+    try {
+      const res = await apiFetch(`/api/harvest/${encodeURIComponent(filename)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: editedHarvestContent }),
+      });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(payload?.error || 'Failed to save harvest file');
+      }
+
+      const updatedEntry = createHarvestEditorEntry(filename, editedHarvestContent, existingEntry.sourceLabel);
+      upsertPrimaryHarvestEntry(updatedEntry);
+
+      if (selectedHarvestSource?.filename === filename) {
+        const nextUrls = extractHarvestImageUrls(editedHarvestContent);
+        setSelectedHarvestSource({
+          ...selectedHarvestSource,
+          content: editedHarvestContent,
+          urls: nextUrls,
+        });
+        setImageUrls(nextUrls);
+        setSelectedImageUrls((prev) => prev.filter((url) => nextUrls.includes(url)));
+      }
+
+      setEditingHarvestFilename(null);
+      setEditedHarvestContent('');
+      await fetchHarvest();
+      addLog('success', `Harvest file updated: ${filename}`);
+    } catch (error: any) {
+      const message = error?.message || 'Failed to save harvest file';
+      setHarvestSaveError(message);
+      addLog('error', message);
+    } finally {
+      setIsSavingHarvestEntry(false);
+    }
+  }
+
   const persistSettings = async (settings: any) => {
     if (!isAdmin) {
       addLog('error', 'Admin role is required to save Connectivity, mapping, and preset changes.');
@@ -1130,7 +1406,12 @@ export default function App() {
     // Add a separator instead of clearing completely to prevent 'black screen' feel
     addLog('system', '--- NEW EXTRACTION SESSION STARTED ---');
     setExtractionResult(null);
+    setActiveHarvestEntryFilename(null);
+    setEditingHarvestFilename(null);
+    setEditedHarvestContent('');
+    setHarvestSaveError(null);
     setImageUrls([]);
+    setSelectedHarvestSource(null);
     setSelectedImageUrls([]);
     setImageExportError(null);
     setCurrentScreenshot(null);
@@ -1214,10 +1495,10 @@ export default function App() {
       } else {
         addLog('skill', `Using Raw Data Strategy (${strategy})`);
         await new Promise(r => setTimeout(r, 800));
-        setExtractionResult(`# ${data.title}\n\nRAW DATA PREVIEW (${strategy}):\n\n${data.text}`);
+        setExtractionResult(formatScrapePreview(data.title, strategy, data.text));
         
         if (data.secondary) {
-            setExtractionResult2(`# ${data.secondary.title}\n\nRAW DATA PREVIEW (${data.secondary.strategy || strategy2}):\n\n${data.secondary.text}`);
+          setExtractionResult2(formatScrapePreview(data.secondary.title, data.secondary.strategy || strategy2, data.secondary.text));
         } else {
             setExtractionResult2(null);
         }
@@ -1437,8 +1718,7 @@ export default function App() {
         <div className="h-screen bg-brand-bg flex items-center justify-center p-6">
           <div className="w-full max-w-md bg-black/40 border border-white/10 rounded-3xl p-8 shadow-2xl">
             <div className="space-y-2 mb-6">
-              <h1 className="text-2xl font-black tracking-tight text-white">Moos Studio Login</h1>
-              <p className="text-[11px] text-white/40 uppercase tracking-[0.2em]">Allowlist Session Access</p>
+              <h1 className="text-2xl font-black tracking-tight text-white">Paxth Automation Solution</h1>
             </div>
             <div className="space-y-4">
               <input
@@ -1458,9 +1738,6 @@ export default function App() {
               >
                 {isLoggingIn ? 'Signing In...' : 'Sign In'}
               </button>
-              <p className="text-[10px] text-white/35 leading-relaxed">
-                Access is role-based. Admin users can edit schema, mapping rules, and selector presets.
-              </p>
             </div>
           </div>
         </div>
@@ -1470,13 +1747,11 @@ export default function App() {
       <nav id="top-nav" className="h-14 border-b border-white/10 flex items-center justify-between px-6 bg-black/40 z-10 backdrop-blur-sm">
         <div className="flex items-center gap-3">
           <div
-            className="w-8 h-8 rounded flex items-center justify-center text-xl bg-white/10 border border-white/20 shadow-lg shadow-white/5"
-            aria-label="MooStudioza logo"
-            role="img"
+            className="h-9 w-9 rounded flex items-center justify-center bg-white/10 border border-white/20 shadow-lg shadow-white/5 overflow-hidden"
           >
-            <span className="cow-bob" aria-hidden="true">🐄</span>
+            <img src="/logos.png" alt="Paxth logo" className="h-full w-full object-contain" />
           </div>
-          <h1 className="text-lg font-medium tracking-tight">MooStudioza</h1>
+          <h1 className="text-lg font-medium tracking-tight">paxth v22.30</h1>
         </div>
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
@@ -1895,6 +2170,13 @@ export default function App() {
                       </div>
                     </div>
 
+                    <button
+                      onClick={handleDownloadBatchTemplate}
+                      className="w-full py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 hover:text-white/80 rounded text-[9px] font-bold uppercase tracking-widest transition-all"
+                    >
+                      ↓ Download Batch Template
+                    </button>
+
                     {batchData.length > 0 && (
                       <div className="p-3 bg-green-500/10 border border-green-500/20 rounded-lg flex items-center justify-between">
                         <div className="flex items-center gap-2">
@@ -1986,13 +2268,7 @@ export default function App() {
                               <span className="text-[8px] text-white/20 uppercase">{(file.size / 1024).toFixed(1)} KB • {new Date(file.mtime).toLocaleDateString()}</span>
                             </div>
                             <button 
-                              onClick={async () => {
-                                const res = await apiFetch(`/api/harvest/${file.name}`);
-                                const data = await res.json();
-                                setExtractionResult(data.content);
-                                setIsModalOpen(true);
-                                addLog('action', `Inspecting batch archive: ${file.name}`);
-                              }}
+                              onClick={() => openHarvestFile(file.name, 'batch harvest')}
                               className="px-3 py-1 bg-green-600/10 hover:bg-green-600 text-green-500 hover:text-white rounded text-[9px] font-bold uppercase transition-all opacity-0 group-hover:opacity-100"
                             >
                               Open
@@ -3056,7 +3332,7 @@ export default function App() {
                     )}
 
                     {!isScraping && (
-                      (extractionResult || extractionResult2) ? (
+                      (extractionResult || extractionResult2 || primaryHarvestEntries.length > 0) ? (
                         <div className="flex-1 flex flex-col gap-4 overflow-y-auto custom-scrollbar">
                           {extractionResult && (
                             <details className="group border border-white/10 bg-zinc-900/40 rounded-xl overflow-hidden shrink-0" open>
@@ -3069,7 +3345,7 @@ export default function App() {
                                       {currentScreenshot && (
                                         <button onClick={(e) => { e.preventDefault(); setIsScreenshotExpanded(true) }} className="p-1 px-3 bg-purple-600/10 hover:bg-purple-600/20 text-purple-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">View Screenshot</button>
                                       )}
-                                      <button onClick={(e) => { e.preventDefault(); setIsModalOpen(true) }} className="p-1 px-3 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Expand View</button>
+                                      <button onClick={(e) => { e.preventDefault(); setActiveHarvestEntryFilename(null); setIsModalOpen(true) }} className="p-1 px-3 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Expand View</button>
                                       <button onClick={(e) => { e.preventDefault(); handleEditPrimary() }} className="p-1 px-3 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Edit</button>
                                     </>
                                   )}
@@ -3097,6 +3373,66 @@ export default function App() {
                               </div>
                             </details>
                           )}
+
+                          {primaryHarvestEntries.map((entry) => {
+                            const isEditingEntry = editingHarvestFilename === entry.filename;
+                            const isEntryOpen = primaryHarvestEntries.length === 1 || activeHarvestEntryFilename === entry.filename || isEditingEntry;
+
+                            return (
+                              <details key={entry.filename} className="group border border-white/10 bg-zinc-900/40 rounded-xl overflow-hidden shrink-0" open={isEntryOpen}>
+                                <summary
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    setActiveHarvestEntryFilename((prev) => prev === entry.filename ? null : entry.filename);
+                                  }}
+                                  className="min-h-12 border-b border-white/10 flex items-center px-4 justify-between gap-4 bg-white/[0.02] cursor-pointer hover:bg-white/[0.04]"
+                                >
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    <Layout className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                                    <div className="min-w-0">
+                                      <div className="text-[10px] font-bold uppercase text-white/60">Logic Harvest Outcome (Primary)</div>
+                                      <div className="text-[9px] font-mono uppercase tracking-widest text-white/30 truncate">{entry.filename} • {entry.sourceLabel}</div>
+                                    </div>
+                                  </div>
+                                  <div className="flex gap-3 items-center shrink-0">
+                                    {!isEditingEntry && (
+                                      <>
+                                        <button onClick={(e) => { e.preventDefault(); navigator.clipboard.writeText(entry.content); setCopied(true); setTimeout(()=>setCopied(false), 2000); }} className="text-[10px] font-bold text-white/30 hover:text-white transition-colors">{copied ? 'COPIED' : 'COPY MD'}</button>
+                                        <button onClick={(e) => { e.preventDefault(); setActiveHarvestEntryFilename(entry.filename); setIsModalOpen(true); }} className="p-1 px-3 bg-blue-600/10 hover:bg-blue-600/20 text-blue-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Expand View</button>
+                                        <button onClick={(e) => { e.preventDefault(); handleEditSavedHarvest(entry.filename); }} className="p-1 px-3 bg-amber-600/10 hover:bg-amber-600/20 text-amber-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Edit</button>
+                                      </>
+                                    )}
+                                    {isEditingEntry && (
+                                      <>
+                                        <button onClick={(e) => { e.preventDefault(); void handleSaveSavedHarvest(entry.filename); }} disabled={isSavingHarvestEntry} className="p-1 px-3 bg-green-600/10 hover:bg-green-600/20 disabled:opacity-50 text-green-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter flex items-center gap-2">
+                                          {isSavingHarvestEntry ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                                          Save
+                                        </button>
+                                        <button onClick={(e) => { e.preventDefault(); handleCancelSavedHarvestEdit(); }} disabled={isSavingHarvestEntry} className="p-1 px-3 bg-red-600/10 hover:bg-red-600/20 disabled:opacity-50 text-red-400 rounded text-[10px] font-bold uppercase transition-all tracking-tighter">Cancel</button>
+                                      </>
+                                    )}
+                                  </div>
+                                </summary>
+                                <div className="p-6 overflow-y-auto max-h-[500px] custom-scrollbar space-y-4">
+                                  {isEditingEntry && harvestSaveError && (
+                                    <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs text-red-200">{harvestSaveError}</div>
+                                  )}
+                                  {isEditingEntry ? (
+                                    <textarea
+                                      value={editedHarvestContent}
+                                      onChange={(e) => setEditedHarvestContent(e.target.value)}
+                                      className="w-full h-[400px] p-4 bg-zinc-900 border border-white/10 rounded text-white text-sm font-mono resize-none focus:outline-none focus:border-blue-500"
+                                      placeholder="Edit harvested markdown..."
+                                    />
+                                  ) : (
+                                    <div className="prose prose-invert prose-xs max-w-none">
+                                      <div className="markdown-body"><ReactMarkdown>{entry.content}</ReactMarkdown></div>
+                                    </div>
+                                  )}
+                                </div>
+                              </details>
+                            );
+                          })}
                           
                           {extractionResult2 && (
                             <details className="group border border-white/10 bg-zinc-900/40 rounded-xl overflow-hidden shrink-0" open>
@@ -3234,6 +3570,13 @@ export default function App() {
                                  {job.harvestFile && (
                                    <div className="flex items-center gap-2">
                                      <div className="text-green-500 flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full bg-green-500"></div> HARVEST_READY</div>
+                                     <button
+                                       onClick={() => openHarvestFile(job.harvestFile!, 'job harvest')}
+                                       className="w-4 h-4 bg-white/5 hover:bg-white/10 text-blue-400 rounded flex items-center justify-center transition-all"
+                                       title="Open Harvest File"
+                                     >
+                                       <Eye className="w-3 h-3" />
+                                     </button>
                                      <button 
                                        onClick={() => handleHarvestDelete(job.harvestFile!)}
                                        className="w-4 h-4 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded flex items-center justify-center transition-all"
@@ -3414,39 +3757,51 @@ export default function App() {
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                       <div>
                         <h3 className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">Load from Harvest File</h3>
-                        <p className="text-[11px] text-white/45 mt-1">Extract all image URLs directly from a previously scraped .md harvest file.</p>
-                      </div>
-                      <div className="flex gap-2">
-                        <select
-                          onChange={(e) => {
-                            if (e.target.value) {
-                              loadHarvestFile(e.target.value);
-                              e.target.value = '';
-                            }
-                          }}
-                          disabled={loadingHarvestFile || harvestFiles.length === 0}
-                          className="px-4 py-2 rounded-xl border border-emerald-500/20 bg-black/40 text-white text-[10px] uppercase tracking-widest font-bold focus:border-emerald-500/50 outline-none disabled:opacity-50"
-                        >
-                          <option value="">Select harvest file...</option>
-                          {harvestFiles.map((file: any, idx: number) => (
-                            <option key={idx} value={file.name}>{file.name}</option>
-                          ))}
-                        </select>
-                        <button
-                          disabled={loadingHarvestFile || harvestFiles.length === 0}
-                          className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-600/40 disabled:text-white/50 text-white text-[10px] uppercase tracking-widest font-black transition-all shadow-lg active:scale-95"
-                        >
-                          {loadingHarvestFile ? 'Loading...' : 'Load'}
-                        </button>
+                        <p className="text-[11px] text-white/45 mt-1">Each sku.md file is listed separately. Select one file to show only that harvest file&apos;s image URLs.</p>
                       </div>
                     </div>
+                    {selectedHarvestSource && (
+                      <div className="rounded-2xl border border-emerald-500/20 bg-black/30 px-4 py-3 flex items-center justify-between gap-3">
+                        <div>
+                          <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">Active Harvest File</div>
+                          <div className="text-xs font-mono text-white/75 mt-1">{selectedHarvestSource.filename}</div>
+                        </div>
+                        <div className="text-[10px] text-white/45 uppercase tracking-widest">
+                          {selectedHarvestSource.urls.length} URLS • EXPORT AS {selectedHarvestSource.sku}-1.jpg
+                        </div>
+                      </div>
+                    )}
+                    {harvestFiles.length === 0 ? (
+                      <div className="border border-dashed border-white/10 rounded-2xl py-10 flex items-center justify-center opacity-30 italic font-bold uppercase tracking-[0.3em] text-[10px]">
+                        No harvest files available
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                        {harvestFiles.map((file: any, idx: number) => {
+                          const isActive = selectedHarvestSource?.filename === file.name;
+                          return (
+                            <button
+                              key={idx}
+                              type="button"
+                              onClick={() => loadHarvestFile(file.name)}
+                              disabled={loadingHarvestFile}
+                              className={`rounded-2xl border px-4 py-3 text-left transition-all ${isActive ? 'border-emerald-400 bg-emerald-500/10 ring-2 ring-emerald-400/20' : 'border-white/10 bg-black/30 hover:border-emerald-500/30'} ${loadingHarvestFile ? 'opacity-60 cursor-not-allowed' : ''}`}
+                            >
+                              <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">{deriveHarvestSku(file.name)}</div>
+                              <div className="text-xs font-mono text-white/75 truncate mt-2">{file.name}</div>
+                              <div className="text-[10px] text-white/30 uppercase tracking-tight mt-2">{(file.size / 1024).toFixed(1)} KB</div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
 
                   <div className="rounded-3xl border border-cyan-500/20 bg-cyan-500/5 p-5 space-y-4">
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                       <div>
                         <h3 className="text-[10px] font-bold uppercase tracking-widest text-cyan-300">Scraped Image URLs</h3>
-                        <p className="text-[11px] text-white/45 mt-1">Select up to 10 images from the scraped markdown source or load from a harvest file. Export happens locally and does not touch Firebase.</p>
+                        <p className="text-[11px] text-white/45 mt-1">{selectedHarvestSource ? `Showing URL-only output for ${selectedHarvestSource.filename}.` : 'Select up to 10 image URLs from the current scrape output or a harvested sku.md file. Export happens locally and does not touch Firebase.'}</p>
                       </div>
                       <div className="flex flex-wrap items-center gap-3">
                         <span className="px-3 py-1 rounded-full border border-white/10 bg-black/40 text-[10px] font-bold text-white/60 uppercase tracking-widest">
@@ -3478,33 +3833,51 @@ export default function App() {
                         No scraped image URLs yet
                       </div>
                     ) : (
-                      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
+                      <div className="space-y-3">
                         {imageUrls.map((src, index) => {
                           const isSelected = selectedImageUrls.includes(src);
                           const isDisabled = !isSelected && selectedImageUrls.length >= 10;
+                          const exportSku = sanitizeImageSku(selectedHarvestSource?.sku || imageSku || 'sku');
                           return (
                             <button
                               key={`${src}-${index}`}
                               type="button"
                               onClick={() => toggleImageSelection(src)}
                               disabled={isDisabled}
-                              className={`text-left rounded-2xl border transition-all overflow-hidden group ${isSelected ? 'border-cyan-400 bg-cyan-500/10 ring-2 ring-cyan-400/30' : 'border-white/10 bg-black/40 hover:border-white/20'} ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}`}
+                              className={`w-full text-left rounded-2xl border transition-all overflow-hidden group ${isSelected ? 'border-cyan-400 bg-cyan-500/10 ring-2 ring-cyan-400/30' : 'border-white/10 bg-black/40 hover:border-white/20'} ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}`}
                             >
-                              <div className="relative aspect-square bg-white p-3 flex items-center justify-center">
-                                <img
-                                  src={src}
-                                  alt={`Scraped image ${index + 1}`}
-                                  className="max-w-full max-h-full object-contain"
-                                />
-                                <div className="absolute top-3 left-3 px-2 py-1 rounded-full bg-black/70 text-[9px] font-bold uppercase tracking-widest text-white/80">
-                                  {sanitizeImageSku(imageSku) || 'sku'}-{index + 1}
+                              <div className="p-4 flex items-start gap-4">
+                                <div className="relative shrink-0 w-20 h-20 rounded-xl overflow-hidden border border-white/10 bg-black/40">
+                                  <img
+                                    src={src}
+                                    alt={`${exportSku}-${index + 1}`}
+                                    loading="lazy"
+                                    referrerPolicy="no-referrer"
+                                    className="w-full h-full object-cover"
+                                    onError={(e) => {
+                                      e.currentTarget.style.display = 'none';
+                                      const fallback = e.currentTarget.nextElementSibling;
+                                      if (fallback instanceof HTMLElement) {
+                                        fallback.style.display = 'flex';
+                                      }
+                                    }}
+                                  />
+                                  <div className="hidden absolute inset-0 items-center justify-center bg-black/40 text-white/35">
+                                    <ImageIcon className="w-5 h-5" />
+                                  </div>
                                 </div>
-                                <div className={`absolute top-3 right-3 w-7 h-7 rounded-full border flex items-center justify-center transition-colors ${isSelected ? 'bg-cyan-500 border-cyan-300 text-white' : 'bg-black/70 border-white/20 text-white/30 group-hover:text-white/60'}`}>
+                                <div className="shrink-0 px-3 py-2 rounded-xl bg-black/40 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-cyan-200">
+                                  {exportSku}-{index + 1}.jpg
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-[10px] font-bold uppercase tracking-widest text-white/35 mb-2">
+                                    {selectedHarvestSource ? selectedHarvestSource.filename : 'Current scrape session'}
+                                  </div>
+                                  <div className="text-[11px] font-mono text-white/75 break-all leading-relaxed">{src}</div>
+                                </div>
+                                <div className={`shrink-0 w-7 h-7 rounded-full border flex items-center justify-center transition-colors ${isSelected ? 'bg-cyan-500 border-cyan-300 text-white' : 'bg-black/70 border-white/20 text-white/30 group-hover:text-white/60'}`}>
                                   {isSelected && <Check className="w-4 h-4" />}
                                 </div>
-                              </div>
-                              <div className="p-3 border-t border-white/10">
-                                <div className="text-[10px] font-mono text-white/50 truncate">{src}</div>
                               </div>
                             </button>
                           );
@@ -3665,7 +4038,7 @@ export default function App() {
           </div>
         )}
 
-        {isModalOpen && extractionResult && (
+        {isModalOpen && modalHarvestContent && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 md:p-10 bg-black/90 backdrop-blur-sm">
             <motion.div 
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
@@ -3680,13 +4053,40 @@ export default function App() {
                   </div>
                   <div>
                     <h2 className="text-sm font-bold text-white tracking-tight">Extracted Logic Report</h2>
-                    <p className="text-[10px] text-white/30 font-mono uppercase tracking-widest">{strategy}</p>
+                    <p className="text-[10px] text-white/30 font-mono uppercase tracking-widest">{activeHarvestEntry ? `${activeHarvestEntry.filename} • ${activeHarvestEntry.sourceLabel}` : strategy}</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  {activeHarvestEntry && !isEditingActiveHarvestEntry && (
+                    <button
+                      onClick={() => handleEditSavedHarvest(activeHarvestEntry.filename)}
+                      className="px-3 py-2 hover:bg-amber-500/10 rounded-xl transition-colors text-amber-400 hover:text-amber-300 text-[10px] font-bold uppercase tracking-widest"
+                    >
+                      Edit
+                    </button>
+                  )}
+                  {activeHarvestEntry && isEditingActiveHarvestEntry && (
+                    <>
+                      <button
+                        onClick={() => void handleSaveSavedHarvest(activeHarvestEntry.filename)}
+                        disabled={isSavingHarvestEntry}
+                        className="px-3 py-2 hover:bg-green-500/10 rounded-xl transition-colors text-green-400 hover:text-green-300 text-[10px] font-bold uppercase tracking-widest disabled:opacity-50 flex items-center gap-2"
+                      >
+                        {isSavingHarvestEntry ? <Loader2 className="w-4 h-4 animate-spin" /> : null}
+                        Save
+                      </button>
+                      <button
+                        onClick={handleCancelSavedHarvestEdit}
+                        disabled={isSavingHarvestEntry}
+                        className="px-3 py-2 hover:bg-red-500/10 rounded-xl transition-colors text-red-400 hover:text-red-300 text-[10px] font-bold uppercase tracking-widest disabled:opacity-50"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  )}
                   <button 
                     onClick={() => {
-                      navigator.clipboard.writeText(extractionResult);
+                      navigator.clipboard.writeText(modalHarvestContent);
                       setCopied(true);
                       setTimeout(() => setCopied(false), 2000);
                     }}
@@ -3704,20 +4104,34 @@ export default function App() {
               </div>
 
               <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
-                <div className="max-w-none prose prose-invert prose-blue prose-sm markdown-body">
-                  <ReactMarkdown>{extractionResult}</ReactMarkdown>
-                </div>
+                {activeHarvestEntry && isEditingActiveHarvestEntry ? (
+                  <div className="space-y-4">
+                    {harvestSaveError && (
+                      <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs text-red-200">{harvestSaveError}</div>
+                    )}
+                    <textarea
+                      value={editedHarvestContent}
+                      onChange={(e) => setEditedHarvestContent(e.target.value)}
+                      className="w-full h-full min-h-[60vh] p-4 bg-zinc-900 border border-white/10 rounded text-white text-sm font-mono resize-none focus:outline-none focus:border-blue-500"
+                      placeholder="Edit harvested markdown..."
+                    />
+                  </div>
+                ) : (
+                  <div className="max-w-none prose prose-invert prose-blue prose-sm markdown-body">
+                    <ReactMarkdown>{modalHarvestContent}</ReactMarkdown>
+                  </div>
+                )}
               </div>
               
               <div className="h-12 border-t border-white/10 bg-black/40 flex items-center justify-between px-8 text-[10px] text-white/20 font-mono tracking-widest uppercase">
                 <div className="flex gap-6 items-center">
                   <button 
                     onClick={() => {
-                      const blob = new Blob([extractionResult], { type: 'text/markdown' });
+                      const blob = new Blob([modalHarvestContent], { type: 'text/markdown' });
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement('a');
                       a.href = url;
-                      a.download = `report_${new Date().getTime()}.md`;
+                      a.download = activeHarvestEntry?.filename || `report_${new Date().getTime()}.md`;
                       a.click();
                       URL.revokeObjectURL(url);
                     }}
@@ -3882,13 +4296,7 @@ export default function App() {
                       </div>
                       <div className="flex gap-2 transition-all">
                         <button 
-                          onClick={async () => {
-                            const res = await apiFetch(`/api/harvest/${file.name}`);
-                            const data = await res.json();
-                            setExtractionResult(data.content);
-                            setIsModalOpen(true);
-                            addLog('action', `Opening harvest archive: ${file.name}`);
-                          }}
+                          onClick={() => openHarvestFile(file.name)}
                           className="p-2 bg-blue-600/10 hover:bg-blue-600 text-blue-400 hover:text-white rounded-xl transition-all"
                           title="View Content"
                         >
