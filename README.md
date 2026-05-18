@@ -16,7 +16,7 @@
 MoosStudio is a full-stack product content automation platform built for e-commerce teams. It scrapes product pages using a stealth browser, structures raw data against configurable attribute sets, enriches content with an LLM (Groq), and exports ready-to-import XLSX or JSON files.
 
 ### Key Capabilities
-
+  
 | Feature | Details |
 |---|---|
 | **Stealth Scraping** | CloakBrowser (Chromium) with Playwright fallback — bypasses most bot-detection |
