@@ -1,4 +1,4 @@
-import { apiFetch } from "./auth";
+import { apiFetch, setCsrfToken } from "./auth";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PresetDropdown } from "./components/PresetDropdown";
 import type { SkuRecord, HarvestFile, Job } from "./types";
@@ -442,6 +442,7 @@ export default function App() {
       if (payload?.user) {
         setAuthUser(payload.user);
       }
+      setCsrfToken(payload?.csrfToken || null);
       await hydrateCoreData();
       return true;
     } catch {
@@ -470,6 +471,7 @@ export default function App() {
     } catch {
       // Best effort logout.
     }
+    setCsrfToken(null);
     setAuthUser(null);
     setAllowlistUsers([]);
     addLog('system', 'Session ended.');
@@ -701,12 +703,17 @@ export default function App() {
         if (res.ok) {
           const payload = await res.json();
           setAuthUser(payload.user || null);
+          setCsrfToken(payload?.csrfToken || null);
           await hydrateCoreData();
         } else {
+          setCsrfToken(null);
           setAuthUser(null);
         }
       } catch {
-        if (mounted) setAuthUser(null);
+        if (mounted) {
+          setCsrfToken(null);
+          setAuthUser(null);
+        }
       } finally {
         if (mounted) setIsAuthChecking(false);
       }
@@ -1747,9 +1754,9 @@ export default function App() {
       <nav id="top-nav" className="h-14 border-b border-white/10 flex items-center justify-between px-6 bg-black/40 z-10 backdrop-blur-sm">
         <div className="flex items-center gap-3">
           <div
-            className="h-9 w-9 rounded flex items-center justify-center bg-white/10 border border-white/20 shadow-lg shadow-white/5 overflow-hidden"
+            className="h-9 w-14 rounded flex items-center justify-center bg-black border border-white/10 shadow-lg shadow-white/5 overflow-hidden"
           >
-            <img src="/logos.png" alt="Paxth logo" className="h-full w-full object-contain" />
+            <img src="/logoq.png" alt="paxth logo" className="h-full w-full object-contain" />
           </div>
           <h1 className="text-lg font-medium tracking-tight">paxth v22.30</h1>
         </div>

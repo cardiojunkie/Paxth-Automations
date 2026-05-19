@@ -94,6 +94,24 @@ interface ScrapeResult {
   strategy?: ScrapeTargetData['strategy'];
 }
 
+interface AttributeSetConfig {
+  name: string;
+  fields: string[];
+  mdRules?: string;
+  mdFileName?: string;
+}
+
+interface ServerSettings {
+  title: string;
+  bullets: string;
+  description: string;
+  keywords: string;
+  groqApiKey: string;
+  attributeSets: AttributeSetConfig[];
+  selectorPresets: Array<{ name: string; selector: string; strategy: string }>;
+  plpSelectorPresets: Array<{ name: string; selector: string }>;
+}
+
 // Keep flexible typing due to CloakBrowser/Playwright incompatibilities
 // In production, keep 'any' for browser objects. Strong typing elsewhere.
 // BrowserLike, BusyError, HttpError, getBrowser, withBrowserTask are imported from src/server/
@@ -420,6 +438,7 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT || 3000);
   const AUTH_COOKIE = 'auth_user';
+  const requireSignedSessions = process.env.NODE_ENV === 'production';
   const trustProxy = parseBooleanEnv(process.env.TRUST_PROXY, process.env.NODE_ENV === 'production');
   if (trustProxy) {
     app.set('trust proxy', 1);
@@ -439,12 +458,21 @@ async function startServer() {
   if (cookieSameSite === 'none' && !configuredCookieSecure) {
     console.warn('[SERVER] COOKIE_SAME_SITE=none requires secure cookies. Enforcing secure=true.');
   }
-  
+
   const CORS_ORIGINS = (process.env.CORS_ORIGINS || '')
     .split(',')
     .map((v) => v.trim())
     .filter(Boolean);
   const ALLOW_ALL_CORS = CORS_ORIGINS.includes('*');
+
+  if (requireSignedSessions) {
+    if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.trim().length < 32) {
+      throw new Error('[SERVER] SESSION_SECRET must be set to at least 32 characters in production.');
+    }
+    if (cookieSameSite === 'none' && CORS_ORIGINS.length === 0) {
+      throw new Error('[SERVER] COOKIE_SAME_SITE=none requires explicit CORS_ORIGINS in production.');
+    }
+  }
 
   if (process.env.NODE_ENV === 'production' && CORS_ORIGINS.length === 0) {
     console.warn('[SERVER] CORS_ORIGINS is empty in production. Only same-origin/non-browser requests are expected to work.');
@@ -525,7 +553,7 @@ async function startServer() {
         }
         return callback(new Error('Origin not allowed by CORS'));
       },
-      methods: ['GET', 'POST', 'DELETE'],
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       credentials: true
     }));
   } else {
@@ -547,6 +575,10 @@ async function startServer() {
       if (!payload) return null; // invalid signature or expired
       // Re-check allowlist on every request so role changes/removals take effect immediately
       return dbService.getAllowlistUser(payload.email);
+    }
+
+    if (requireSignedSessions) {
+      return null;
     }
 
     // v1 legacy path: plain email in cookie (migration window)
@@ -597,6 +629,18 @@ async function startServer() {
     }
     next();
   };
+
+  const mutatingMethods = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+  const csrfExemptPaths = new Set([
+    '/auth/login',
+    '/auth/logout',
+  ]);
+
+  app.use('/api', (req, res, next) => {
+    if (!mutatingMethods.has(req.method)) return next();
+    if (csrfExemptPaths.has(req.path)) return next();
+    return requireCsrf(req, res, next);
+  });
 
   // Validation middleware factory (Security: Validates all input)
   const validateRequest = <T>(schema: z.ZodSchema<T>) => {
@@ -2074,23 +2118,35 @@ async function startServer() {
     }
   });
 
-  const SETTINGS_FILE = path.join(process.cwd(), 'settings.json');
   let currentGroq: Groq | null = groq;
+  const defaultSettings: ServerSettings = {
+    title: '',
+    bullets: '',
+    description: '',
+    keywords: '',
+    groqApiKey: '',
+    attributeSets: [],
+    selectorPresets: [],
+    plpSelectorPresets: [],
+  };
 
-  async function loadSettings() {
+  async function loadSettings(): Promise<ServerSettings> {
     try {
-      return await dbService.getSettings();
-    } catch (e) {
+      const rawSettings = await dbService.getSettings();
+      if (!rawSettings || typeof rawSettings !== 'object') {
+        return defaultSettings;
+      }
+
+      const typedSettings = rawSettings as Partial<ServerSettings>;
       return {
-        title: "",
-        bullets: "",
-        description: "",
-        keywords: "",
-        groqApiKey: "",
-        attributeSets: [],
-        selectorPresets: [],
-        plpSelectorPresets: []
+        ...defaultSettings,
+        ...typedSettings,
+        attributeSets: Array.isArray(typedSettings.attributeSets) ? typedSettings.attributeSets : [],
+        selectorPresets: Array.isArray(typedSettings.selectorPresets) ? typedSettings.selectorPresets : [],
+        plpSelectorPresets: Array.isArray(typedSettings.plpSelectorPresets) ? typedSettings.plpSelectorPresets : [],
       };
+    } catch (e) {
+      return defaultSettings;
     }
   }
 
@@ -2138,8 +2194,7 @@ async function startServer() {
       return res.status(401).json({ error: 'User is not in allowlist.' });
     }
 
-    // Upgrade to signed session when SESSION_SECRET is configured.
-    // Falls back to legacy raw-email cookie when secret is absent (dev/unconfigured).
+    // In production, signed sessions are mandatory.
     let cookieValue = normalized;
     let csrfToken: string | undefined;
     try {
@@ -2147,7 +2202,9 @@ async function startServer() {
       cookieValue = token;
       csrfToken = generateCsrfToken(payload.sid);
     } catch {
-      // SESSION_SECRET not configured — continue with legacy plain-email cookie
+      if (requireSignedSessions) {
+        return res.status(500).json({ error: 'Session configuration error. Contact administrator.' });
+      }
     }
 
     res.cookie(AUTH_COOKIE, cookieValue, {
@@ -2177,12 +2234,19 @@ async function startServer() {
 
   app.get('/api/auth/me', requireAuth, (req, res) => {
     const user: any = (req as any).authUser;
+    const cookieValue = req.cookies?.[AUTH_COOKIE];
+    const payload = typeof cookieValue === 'string' && isSignedToken(cookieValue)
+      ? verifySession(cookieValue)
+      : null;
+    const csrfToken = payload ? generateCsrfToken(payload.sid) : undefined;
+
     return res.json({
       authenticated: true,
       user: {
         email: user.email,
         role: user.role === 'admin' ? 'admin' : 'user'
-      }
+      },
+      ...(csrfToken ? { csrfToken } : {}),
     });
   });
 

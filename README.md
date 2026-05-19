@@ -140,6 +140,7 @@ fuser -k 3000/tcp 24678/tcp 2>/dev/null; npm run dev
 | `FIRESTORE_MODE` | No | `all` (default) · `outputs-only` · `off` |
 | `NODE_ENV` | No | `production` in deployed environments |
 | `PORT` | No | Server port (default `3000`) |
+| `SESSION_SECRET` | Yes in production | Required for signed auth sessions; minimum 32 characters |
 | `CORS_ORIGINS` | Recommended for cross-origin UI | Comma-separated allowed browser origins (set `*` only in trusted internal networks) |
 | `COOKIE_SAME_SITE` | No | Auth cookie policy: `strict` (default), `lax`, or `none` for cross-origin frontend/API |
 | `COOKIE_SECURE` | No | Cookie `Secure` flag (`true` in production; required when `COOKIE_SAME_SITE=none`) |
@@ -160,9 +161,10 @@ Use the included multi-stage `Dockerfile` on any Docker-compatible host (VPS, Ra
 
 1. Ensure `settings/allowlist.json` has at least one `admin` user email.
 2. Set `GROQ_API_KEY` if AI enrichment is needed.
-3. Set `FIREBASE_SERVICE_ACCOUNT_JSON` for Firestore access.
-4. Set `CORS_ORIGINS` when frontend is served from a different origin.
-5. If frontend and API are on different domains, set `COOKIE_SAME_SITE=none` and `COOKIE_SECURE=true`.
+3. Set `SESSION_SECRET` (32+ chars) for signed auth sessions.
+4. Set `FIREBASE_SERVICE_ACCOUNT_JSON` for Firestore access.
+5. Set `CORS_ORIGINS` when frontend is served from a different origin.
+6. If frontend and API are on different domains, set `COOKIE_SAME_SITE=none` and `COOKIE_SECURE=true`.
 
 ### Recommended runtime settings
 
@@ -194,6 +196,7 @@ docker build -t moosstudioza .
 # Run
 docker run -p 3000:3000 \
   -e GROQ_API_KEY=your_key \
+  -e SESSION_SECRET=replace_with_32_plus_char_secret \
   -e CORS_ORIGINS=https://your-frontend-domain.com \
   -e COOKIE_SAME_SITE=none \
   -e COOKIE_SECURE=true \
