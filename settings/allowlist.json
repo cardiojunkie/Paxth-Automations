@@ -8,5 +8,10 @@
     "email": "shilpamantle@gmail.com",
     "role": "admin",
     "addedAt": "2026-05-18T08:01:59.219Z"
+  },
+  {
+    "email": "12@gmail.com",
+    "role": "user",
+    "addedAt": "2026-05-19T10:43:46.287Z"
   }
 ]

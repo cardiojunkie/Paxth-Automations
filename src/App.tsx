@@ -3137,6 +3137,18 @@ export default function App() {
                                  </div>
 
                                  <div className="lg:col-span-8 flex flex-col gap-6">
+                                    <div className="bg-[#0a0a0a] border border-white/5 rounded-[32px] px-8 py-6 shadow-2xl">
+                                      <div className="flex items-center justify-between gap-4">
+                                        <div>
+                                          <p className="text-[9px] text-white/30 uppercase tracking-[0.28em] font-black">Schema Hub Metrics</p>
+                                          <h4 className="text-sm text-white/70 font-bold tracking-wide mt-2">Total Compiled Schemas</h4>
+                                        </div>
+                                        <div className="px-5 py-2 bg-blue-600/10 border border-blue-500/20 rounded-2xl text-right">
+                                          <span className="text-2xl text-blue-400 font-black leading-none">{appSettings.attributeSets.length}</span>
+                                        </div>
+                                      </div>
+                                    </div>
+
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                        {appSettings.attributeSets.map((set, idx) => (
                                          <motion.div 
