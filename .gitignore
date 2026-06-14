@@ -13,6 +13,10 @@ service-account*.json
 *.pem
 *.key
 
+# Firebase configuration (contains API keys)
+firebase-applet-config.json
+firebase-applet-config.local.json
+
 # Generated runtime artifacts
 outputs/
 harvest/
