@@ -13,6 +13,7 @@ CloakBrowser-main
 outputs
 jobs
 harvest
+settings/app_settings.json
 firebase-service-account.json
 service-account.json
 service-account*.json

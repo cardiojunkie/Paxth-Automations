@@ -136,6 +136,39 @@ async function buildXlsxBuffer(rows: any[], headers: string[]): Promise<Buffer> 
   return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as ArrayBuffer);
 }
 
+type SpreadsheetCell = string | number | boolean | null;
+
+function normalizeWorkbookCellValue(value: ExcelJS.CellValue): SpreadsheetCell {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value !== 'object') return value as SpreadsheetCell;
+
+  const complex = value as any;
+  if (complex.result !== undefined) return normalizeWorkbookCellValue(complex.result);
+  if (complex.text !== undefined) return String(complex.text);
+  if (Array.isArray(complex.richText)) {
+    return complex.richText.map((part: any) => part?.text || '').join('');
+  }
+  return String(value);
+}
+
+async function readXlsxRowsFromBuffer(buffer: Buffer): Promise<SpreadsheetCell[][]> {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(buffer as any);
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) return [];
+
+  const rows: SpreadsheetCell[][] = [];
+  worksheet.eachRow({ includeEmpty: true }, (row) => {
+    const values: SpreadsheetCell[] = [];
+    for (let col = 1; col <= worksheet.columnCount; col += 1) {
+      values.push(normalizeWorkbookCellValue(row.getCell(col).value));
+    }
+    rows.push(values);
+  });
+  return rows;
+}
+
 // Keep flexible typing due to CloakBrowser/Playwright incompatibilities
 // In production, keep 'any' for browser objects. Strong typing elsewhere.
 // BrowserLike, BusyError, HttpError, getBrowser, withBrowserTask are imported from src/server/
@@ -435,6 +468,13 @@ const AI_CREDITS_MISSING_KEY_MESSAGE = 'AI Credits API key is not configured. Ad
 const MAP_AI_MISSING_MODEL_MESSAGE = 'Please select or enter a model for Map AI.';
 const AI_CREDITS_AUTH_MESSAGE = 'AI Credits authentication failed. Check your API key in .env or Settings → Connectivity.';
 const MAP_AI_REQUEST_FAILED_MESSAGE = 'Map AI request failed while calling AI Credits.';
+const SKU_ATTRIBUTE_SET_ALIASES = new Set([
+  'attribute_set',
+  'attribute_set_name',
+  'attribute_setname',
+  'attributeset',
+  'schema',
+]);
 
 function normalizeMapAiModel(aiModel?: string | null): string {
   const model = (aiModel ?? DEFAULT_MAP_AI_MODEL).toString().trim();
@@ -459,6 +499,50 @@ function toMapAiPublicError(error: any): Error {
     return new Error(AI_CREDITS_AUTH_MESSAGE);
   }
   return new Error(MAP_AI_REQUEST_FAILED_MESSAGE);
+}
+
+function readSkuAttributeSetAlias(record?: Record<string, any> | null): string {
+  if (!record) return '';
+  for (const [key, value] of Object.entries(record)) {
+    const normalizedKey = key.toLowerCase().trim().replace(/\s+/g, '_');
+    if (!SKU_ATTRIBUTE_SET_ALIASES.has(normalizedKey)) continue;
+    const attributeSet = typeof value === 'string' ? value.trim() : '';
+    if (attributeSet) return attributeSet;
+  }
+  return '';
+}
+
+function normalizeSkuIndexRecordForStorage(item: Record<string, any>, existing?: Record<string, any>) {
+  const normalizedIncoming: Record<string, any> = {};
+  const incomingAttributeSet = readSkuAttributeSetAlias(item);
+  const existingAttributeSet = readSkuAttributeSetAlias(existing);
+
+  Object.entries(item || {}).forEach(([key, value]) => {
+    if (!key) return;
+    const normalizedKey = key.toLowerCase().trim().replace(/\s+/g, '_');
+    if (SKU_ATTRIBUTE_SET_ALIASES.has(normalizedKey)) return;
+    normalizedIncoming[normalizedKey] = typeof value === 'string' ? value.trim() : value;
+  });
+
+  const merged = { ...(existing || {}), ...normalizedIncoming };
+  Object.keys(merged).forEach((key) => {
+    const normalizedKey = key.toLowerCase().trim().replace(/\s+/g, '_');
+    if (SKU_ATTRIBUTE_SET_ALIASES.has(normalizedKey)) {
+      delete merged[key];
+    }
+  });
+
+  const finalAttributeSet = incomingAttributeSet || existingAttributeSet;
+  if (finalAttributeSet) {
+    merged.attribute_set = finalAttributeSet;
+  }
+
+  return merged;
+}
+
+function readSkuValue(record?: Record<string, any> | null): string {
+  const raw = (record?.sku || record?.SKU)?.toString?.() || '';
+  return raw.trim();
 }
 
 // All Zod schemas are imported from src/server/schemas.ts
@@ -800,6 +884,31 @@ async function startServer() {
       return next(err);
     });
   };
+  const MAX_XLSX_SIZE = 10 * 1024 * 1024; // 10MB
+  const xlsxUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_XLSX_SIZE, files: 1 },
+  });
+  const handleXlsxUpload: express.RequestHandler = (req, res, next) => {
+    xlsxUpload.single("file")(req, res, (err: any) => {
+      if (!err) return next();
+      if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: "XLSX file too large. Maximum size: 10MB" });
+      }
+      return next(err);
+    });
+  };
+
+  function validateXlsxUpload(file: Express.Multer.File | undefined) {
+    if (!file) {
+      throw new HttpError(400, "No XLSX file uploaded");
+    }
+    const hasXlsxName = file.originalname.toLowerCase().endsWith('.xlsx');
+    const hasZipMagic = file.buffer.length >= 2 && file.buffer[0] === 0x50 && file.buffer[1] === 0x4b;
+    if (!hasXlsxName || !hasZipMagic) {
+      throw new HttpError(400, "Only .xlsx files are allowed");
+    }
+  }
 
   async function installSafeRequestInterceptor(context: any) {
     if (!context || typeof context.route !== 'function') return;
@@ -1152,20 +1261,72 @@ async function startServer() {
       }
       const safeSku = requireSafeStorageKey(sku);
       
-      // Save it to the index
+      // Save/update this SKU via the canonical index normalizer.
       const indexData = await dbService.getSkuIndex();
-      const existing = indexData.find((item: any) => (item.sku || item.SKU)?.toString() === safeSku);
-      if (existing) {
-        existing.pdf_text = data.text;
-      } else {
-        indexData.push({ sku: safeSku, pdf_text: data.text });
-      }
-      await dbService.updateSkuIndex(indexData);
+      const map = new Map<string, Record<string, any>>();
+      indexData.forEach((item: any) => {
+        const skuValue = readSkuValue(item);
+        if (!skuValue) return;
+        map.set(skuValue, normalizeSkuIndexRecordForStorage(item));
+      });
+      const existing = map.get(safeSku);
+      const merged = normalizeSkuIndexRecordForStorage({ ...(existing || {}), sku: safeSku, pdf_text: data.text }, existing);
+      map.set(safeSku, merged);
+      await dbService.updateSkuIndex(Array.from(map.values()));
       
       res.json({ message: "PDF processed successfully", sku: safeSku, textPreview: data.text.substring(0, 500) });
     } catch (e: any) {
       console.error("[SERVER] Error processing PDF:", e);
       res.status(e?.statusCode || 500).json({ error: "Failed to process PDF", details: e.message });
+    }
+  });
+
+  app.post("/api/xlsx/rows", requireAuth, handleXlsxUpload, async (req, res) => {
+    try {
+      validateXlsxUpload(req.file);
+      const rows = await readXlsxRowsFromBuffer(req.file!.buffer);
+      res.json({ rows });
+    } catch (e: any) {
+      res.status(e?.statusCode || 500).json({ error: e?.message || "Failed to parse XLSX file" });
+    }
+  });
+
+  app.post("/api/xlsx/template", requireAuth, async (req, res) => {
+    try {
+      const headers = Array.isArray(req.body?.headers) ? req.body.headers : [];
+      const sheetName = typeof req.body?.sheetName === 'string' && req.body.sheetName.trim()
+        ? req.body.sheetName.trim().slice(0, 31)
+        : 'Template';
+      const filename = typeof req.body?.filename === 'string' && req.body.filename.trim()
+        ? req.body.filename.trim().replace(/[^a-z0-9_.-]/gi, '_')
+        : 'template.xlsx';
+
+      const safeHeaders = headers
+        .map((header: unknown) => typeof header === 'string' ? header.trim() : '')
+        .filter((header: string) => header.length > 0)
+        .slice(0, 100);
+
+      if (safeHeaders.length === 0) {
+        return res.status(400).json({ error: "Template headers are required" });
+      }
+
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet(sheetName);
+      worksheet.columns = safeHeaders.map((header: string) => ({
+        header,
+        key: header,
+        width: Math.min(Math.max(header.length + 4, 12), 40),
+      }));
+      worksheet.getRow(1).font = { bold: true };
+      worksheet.views = [{ state: 'frozen', ySplit: 1 }];
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const output = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as ArrayBuffer);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename=${filename.endsWith('.xlsx') ? filename : `${filename}.xlsx`}`);
+      res.send(output);
+    } catch (e: any) {
+      res.status(500).json({ error: e?.message || "Failed to generate XLSX template" });
     }
   });
 
@@ -1177,15 +1338,19 @@ async function startServer() {
     try {
       const existingData = await dbService.getSkuIndex();
       
-      // Merge data by SKU, preferring new data for same SKU
-      const map = new Map();
+      // Merge data by SKU with canonical field normalization.
+      const map = new Map<string, Record<string, any>>();
       existingData.forEach((item: any) => {
-        const skuValue = (item.sku || item.SKU)?.toString();
-        if (skuValue) map.set(skuValue, item);
+        const skuValue = readSkuValue(item);
+        if (!skuValue) return;
+        map.set(skuValue, normalizeSkuIndexRecordForStorage(item));
       });
       data.forEach(item => {
-        const skuValue = (item.sku || item.SKU)?.toString();
-        if (skuValue) map.set(skuValue, item);
+        const skuValue = readSkuValue(item);
+        if (!skuValue) return;
+        const existingItem = map.get(skuValue);
+        const normalizedItem = normalizeSkuIndexRecordForStorage({ ...item, sku: skuValue }, existingItem);
+        map.set(skuValue, normalizedItem);
       });
 
       const mergedData = Array.from(map.values());
@@ -1241,7 +1406,10 @@ async function startServer() {
   app.get("/api/sku/index", requireAuth, async (req, res) => {
     try {
       const data = await dbService.getSkuIndex();
-      res.json(data);
+      const normalizedData = Array.isArray(data)
+        ? data.map((item: any) => normalizeSkuIndexRecordForStorage(item))
+        : [];
+      res.json(normalizedData);
     } catch (e) {
       res.status(500).json({ error: "Failed to read index" });
     }
@@ -2334,7 +2502,7 @@ async function startServer() {
     res.json({ adminConfigured: true });
   });
 
-  app.get('/api/health/firestore', (_req, res) => {
+  app.get('/api/health/firestore', requireAuth, (_req, res) => {
     try {
       const status = dbService.getFirestoreStatus();
       res.json({ success: true, firestore: status });

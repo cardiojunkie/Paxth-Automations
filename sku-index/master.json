@@ -149,5 +149,35 @@
     "attribute_set": "Elec-M&W-Smartphones & Tablets",
     "base_code": "",
     "sap_data": ""
+  },
+  {
+    "sku": "21111111111111111",
+    "brand": "",
+    "ean": "",
+    "shipping_weight": "",
+    "product_type": "",
+    "base_code": "",
+    "sap_data": "",
+    "attribute_set": "Elec-M&W-Smartphones & Tablets"
+  },
+  {
+    "sku": "2",
+    "brand": "",
+    "ean": "",
+    "shipping_weight": "",
+    "product_type": "",
+    "base_code": "",
+    "sap_data": "",
+    "attribute_set": "Elec-M&W-Smartphones & Tablets"
+  },
+  {
+    "sku": "1",
+    "brand": "",
+    "ean": "",
+    "shipping_weight": "",
+    "product_type": "",
+    "base_code": "",
+    "sap_data": "",
+    "attribute_set": "Elec-M&W-Smartphones & Tablets"
   }
 ]

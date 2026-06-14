@@ -13,7 +13,7 @@ services:
         value: "3000"
       - key: FIRESTORE_MODE
         value: all
-      - key: GROQ_API_KEY
+      - key: AI_CREDITS_API_KEY
         sync: false
       - key: SESSION_SECRET
         sync: false

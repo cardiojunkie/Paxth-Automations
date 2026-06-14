@@ -12,8 +12,6 @@ import type { SkuRecord, HarvestFile, Job } from "./types";
 import { Activity, Beaker, Box, Cpu, Database, ExternalLink, Flame, Info, Layout, Play, Terminal, Zap, Loader2, X, Maximize2, Copy, Check, Eye, AlertCircle, FileSpreadsheet, Upload, Settings, Briefcase, Search, FileText, Globe, Key, List, AlignLeft, Plus, Archive, Trash2, RefreshCw, Network, Image as ImageIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import React, { useState, useRef, useEffect } from 'react';
-import ReactMarkdown from 'react-markdown';
-import * as ExcelJS from 'exceljs';
 
 // ErrorBoundary and PresetDropdown are imported from ./components/
 // Types LogEntry and FirestoreHealth are defined here for local use in App.tsx
@@ -77,34 +75,82 @@ const DEFAULT_MAP_AI_MODELS = [
 ] as const;
 const CUSTOM_MAP_AI_MODEL_VALUE = 'custom';
 const MAP_AI_MISSING_MODEL_MESSAGE = 'Please select or enter a model for Map AI.';
+const SKU_ATTRIBUTE_SET_ALIASES = new Set([
+  'attribute_set',
+  'attribute_set_name',
+  'attribute_setname',
+  'attributeset',
+  'schema',
+]);
 type SpreadsheetCell = string | number | boolean | null;
 
-function normalizeExcelCellValue(value: ExcelJS.CellValue): SpreadsheetCell {
-  if (value == null) return null;
-  if (value instanceof Date) return value.toISOString();
-  if (typeof value !== 'object') return value as SpreadsheetCell;
-  const complex = value as any;
-  if (complex.result !== undefined) return normalizeExcelCellValue(complex.result);
-  if (complex.text !== undefined) return String(complex.text);
-  if (Array.isArray(complex.richText)) {
-    return complex.richText.map((part: any) => part?.text || '').join('');
+const ReactMarkdown = React.lazy(() => import('react-markdown'));
+
+function MarkdownContent({ children }: { children: string }) {
+  return (
+    <React.Suspense fallback={<div className="text-[11px] text-white/45">Loading preview...</div>}>
+      <ReactMarkdown>{children}</ReactMarkdown>
+    </React.Suspense>
+  );
+}
+
+function normalizeSkuIndexRecordForSubmit(
+  record: Record<string, SpreadsheetCell | string | number | boolean | null | undefined>,
+  selectedAttributeSet = '',
+) {
+  const normalized: Record<string, SpreadsheetCell | string | number | boolean | null> = {};
+  let discoveredAttributeSet = '';
+
+  Object.entries(record).forEach(([key, value]) => {
+    if (!key) return;
+    const normalizedKey = key.toLowerCase().trim().replace(/\s+/g, '_');
+    const finalValue = typeof value === 'string' ? value.trim() : value ?? null;
+
+    if (SKU_ATTRIBUTE_SET_ALIASES.has(normalizedKey)) {
+      if (typeof finalValue === 'string' && finalValue) {
+        discoveredAttributeSet = finalValue;
+      }
+      return;
+    }
+
+    normalized[normalizedKey] = finalValue;
+  });
+
+  const finalAttributeSet = selectedAttributeSet.trim() || discoveredAttributeSet.trim();
+  if (finalAttributeSet) {
+    normalized.attribute_set = finalAttributeSet;
   }
-  return String(value);
+
+  return normalized;
+}
+
+function readSkuAttributeSetForDisplay(record?: Record<string, any> | null): string {
+  if (!record) return '';
+  for (const [key, value] of Object.entries(record)) {
+    const normalizedKey = key.toLowerCase().trim().replace(/\s+/g, '_');
+    if (!SKU_ATTRIBUTE_SET_ALIASES.has(normalizedKey)) continue;
+    const attributeSet = typeof value === 'string' ? value.trim() : '';
+    if (attributeSet) return attributeSet;
+  }
+  return '';
 }
 
 async function readFirstWorksheetRows(file: File): Promise<SpreadsheetCell[][]> {
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(await file.arrayBuffer());
-  const worksheet = workbook.worksheets[0];
-  if (!worksheet) return [];
-  const rows: SpreadsheetCell[][] = [];
-  worksheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
-    const values: SpreadsheetCell[] = [];
-    for (let col = 1; col <= worksheet.columnCount; col += 1) {
-      values.push(normalizeExcelCellValue(row.getCell(col).value));
-    }
-    rows[rowNumber - 1] = values;
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const res = await apiFetch('/api/xlsx/rows', {
+    method: 'POST',
+    body: formData,
   });
+
+  if (!res.ok) {
+    const payload = await res.json().catch(() => null);
+    throw new Error(payload?.error || 'Failed to parse XLSX file.');
+  }
+
+  const payload = await res.json();
+  const rows: SpreadsheetCell[][] = Array.isArray(payload?.rows) ? payload.rows : [];
   return rows.filter((row) => row.some((cell) => cell !== null && cell.toString().trim() !== ''));
 }
 
@@ -123,18 +169,18 @@ async function readFirstWorksheetObjects(file: File): Promise<Record<string, Spr
 }
 
 async function downloadXlsxTemplate(filename: string, sheetName: string, headers: string[]) {
-  const workbook = new ExcelJS.Workbook();
-  const worksheet = workbook.addWorksheet(sheetName);
-  worksheet.addRow(headers);
-  worksheet.addRow(headers.map(() => ''));
-  worksheet.getRow(1).font = { bold: true };
-  worksheet.columns.forEach((column, index) => {
-    column.width = Math.min(Math.max(headers[index]?.length + 4 || 12, 12), 42);
+  const res = await apiFetch('/api/xlsx/template', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename, sheetName, headers }),
   });
-  const buffer = await workbook.xlsx.writeBuffer();
-  const blob = new Blob([buffer as ArrayBuffer], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  });
+
+  if (!res.ok) {
+    const payload = await res.json().catch(() => null);
+    throw new Error(payload?.error || 'Failed to generate XLSX template.');
+  }
+
+  const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
@@ -336,11 +382,13 @@ export default function App() {
     base_code: '',
     sap_data: ''
   });
+  const skuIndexFetchVersionRef = useRef(0);
   
   // Sync core data
   useEffect(() => {
     if (!authUser) return;
     const fetchData = async () => {
+      const skuIndexFetchVersion = ++skuIndexFetchVersionRef.current;
       try {
         const safeFetch = async (url: string, defaultVal: any) => {
           try {
@@ -359,7 +407,9 @@ export default function App() {
           safeFetch('/api/settings', {})
         ]);
         setAppSettings(prev => ({ ...prev, ...settings }));
-        setSkuIndex(Array.isArray(idx) ? idx : []);
+        if (skuIndexFetchVersion === skuIndexFetchVersionRef.current) {
+          setSkuIndex(Array.isArray(idx) ? idx : []);
+        }
         setHarvestFiles(Array.isArray(hrv) ? hrv : []);
         if (Array.isArray(idx) && idx.length > 0) fetchJobs();
       } catch (e) {
@@ -425,9 +475,12 @@ export default function App() {
       });
       if (res.ok) {
         addLog('success', `PDF attached as Context 1 for SKU: ${pdfUploadSku}`);
+        const skuIndexFetchVersion = ++skuIndexFetchVersionRef.current;
         const idxRes = await apiFetch('/api/sku/index');
         const refreshedIdx = await idxRes.json();
-        setSkuIndex(Array.isArray(refreshedIdx) ? refreshedIdx : []);
+        if (skuIndexFetchVersion === skuIndexFetchVersionRef.current) {
+          setSkuIndex(Array.isArray(refreshedIdx) ? refreshedIdx : []);
+        }
       } else {
         const err = await res.json();
         addLog('error', `Failed to upload PDF: ${err.error}`);
@@ -468,6 +521,7 @@ export default function App() {
   const [selectedSkuIndexItems, setSelectedSkuIndexItems] = useState<string[]>([]);
   const [jobAiModels, setJobAiModels] = useState<{[sku:string]: string}>({});
   const [customJobAiModels, setCustomJobAiModels] = useState<{[sku:string]: string}>({});
+  const [bulkSkuAttributeSet, setBulkSkuAttributeSet] = useState('');
   // Pagination state for the Jobs module
   const [jobsSearch, setJobsSearch] = useState('');
   const [jobsNextCursor, setJobsNextCursor] = useState<string | null>(null);
@@ -483,6 +537,7 @@ export default function App() {
   const isAdmin = authUser?.role === 'admin';
 
   const hydrateCoreData = async () => {
+    const skuIndexFetchVersion = ++skuIndexFetchVersionRef.current;
     try {
       const [idxRes, harvestRes, settingsRes] = await Promise.all([
         apiFetch('/api/sku/index'),
@@ -492,7 +547,9 @@ export default function App() {
 
       if (idxRes.ok) {
         const idx = await idxRes.json();
-        setSkuIndex(Array.isArray(idx) ? idx : []);
+        if (skuIndexFetchVersion === skuIndexFetchVersionRef.current) {
+          setSkuIndex(Array.isArray(idx) ? idx : []);
+        }
       }
       if (harvestRes.ok) {
         const harvest = await harvestRes.json();
@@ -817,6 +874,14 @@ export default function App() {
   useEffect(() => {
     let mounted = true;
 
+    if (!authUser) {
+      setFirestoreHealth(null);
+      setIsFirestoreStatusLoading(false);
+      return () => {
+        mounted = false;
+      };
+    }
+
     const fetchFirestoreHealth = async () => {
       try {
         const res = await apiFetch('/api/health/firestore');
@@ -843,7 +908,7 @@ export default function App() {
       mounted = false;
       window.clearInterval(interval);
     };
-  }, []);
+  }, [authUser]);
 
   useEffect(() => {
     const selectorPresets = appSettings.selectorPresets?.length > 0 ? appSettings.selectorPresets : defaultSelectorPresets;
@@ -1055,14 +1120,7 @@ export default function App() {
       let data = await readFirstWorksheetObjects(file);
 
       // Sanitize headers to ensure compatibility (sku, brand, ean, shipping_weight, product_type, attribute_set)
-      data = data.map(item => {
-         const normalized: any = {};
-         Object.keys(item).forEach(key => {
-            const lowerKey = key.toLowerCase().trim().replace(/ /g, '_');
-            normalized[lowerKey] = item[key];
-         });
-         return normalized;
-      });
+      data = data.map(item => normalizeSkuIndexRecordForSubmit(item, bulkSkuAttributeSet));
 
       // Map XLS column names to internal field names
       const XLS_COLUMN_MAP: Record<string, string> = {
@@ -1088,9 +1146,12 @@ export default function App() {
         body: JSON.stringify({ data })
       });
       if (res.ok) {
+         const skuIndexFetchVersion = ++skuIndexFetchVersionRef.current;
          const idxRes = await apiFetch('/api/sku/index');
          const refreshedIdx = await idxRes.json();
-         setSkuIndex(Array.isArray(refreshedIdx) ? refreshedIdx : []);
+         if (skuIndexFetchVersion === skuIndexFetchVersionRef.current) {
+           setSkuIndex(Array.isArray(refreshedIdx) ? refreshedIdx : []);
+         }
          addLog('success', `SKU Indexer synced with ${data.length} records (merged with existing).`);
       } else {
          const payload = await res.json().catch(() => null);
@@ -1102,7 +1163,7 @@ export default function App() {
   };
 
   const handleDownloadSkuTemplate = async () => {
-    const headers = ['sku', 'base_code', 'brand', 'attributes__lulu_ean', 'attributes__shipping_weight', 'attributes__lulu_product_type', 'sap_data', 'attribute_Set'];
+    const headers = ['sku', 'base_code', 'brand', 'attributes__lulu_ean', 'attributes__shipping_weight', 'attributes__lulu_product_type', 'sap_data', 'attribute_set'];
     await downloadXlsxTemplate('sku_index_template.xlsx', 'SKU Template', headers);
   };
 
@@ -1213,18 +1274,22 @@ export default function App() {
     }
     
     try {
+      const submittedSku = manualSkuData.sku;
       const res = await apiFetch('/api/sku/index', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data: [manualSkuData] })
+        body: JSON.stringify({ data: [normalizeSkuIndexRecordForSubmit(manualSkuData, manualSkuData.attribute_set)] })
       });
       if (res.ok) {
         // Re-fetch to get merged state
+        const skuIndexFetchVersion = ++skuIndexFetchVersionRef.current;
         const idxRes = await apiFetch('/api/sku/index');
         const refreshedIdx = await idxRes.json();
-        setSkuIndex(Array.isArray(refreshedIdx) ? refreshedIdx : []);
+        if (skuIndexFetchVersion === skuIndexFetchVersionRef.current) {
+          setSkuIndex(Array.isArray(refreshedIdx) ? refreshedIdx : []);
+        }
         setManualSkuData({ sku: '', brand: '', ean: '', shipping_weight: '', product_type: '', attribute_set: '', base_code: '', sap_data: '' });
-        addLog('success', `Manual sku indexed: ${manualSkuData.sku}`);
+        addLog('success', `Manual sku indexed: ${submittedSku}`);
       }
     } catch (e) {
       addLog('error', 'Manual indexing failed.');
@@ -2647,6 +2712,18 @@ export default function App() {
                     <div className="text-[10px] font-bold text-white/80 uppercase">UPLOAD Master Index (.xlsx)</div>
                     <div className="text-[10px] text-white/35">Expected columns match the downloadable template.</div>
                   </div>
+                  <Select
+                    label="Apply Attribute Set"
+                    value={bulkSkuAttributeSet}
+                    onChange={(e) => setBulkSkuAttributeSet(e.target.value)}
+                    className="text-xs"
+                    helpText="Optional: applies this attribute set to every SKU in the uploaded file."
+                  >
+                    <option value="">Use file column if present</option>
+                    {appSettings.attributeSets.map((set, i) => (
+                      <option key={i} value={set.name}>{set.name}</option>
+                    ))}
+                  </Select>
                   <Button
                     onClick={handleDownloadSkuTemplate}
                     variant="secondary"
@@ -3506,7 +3583,7 @@ export default function App() {
                                   />
                                 ) : (
                                   <div className="prose prose-invert prose-xs max-w-none">
-                                    <div className="markdown-body"><ReactMarkdown>{extractionResult}</ReactMarkdown></div>
+                                    <div className="markdown-body"><MarkdownContent>{extractionResult}</MarkdownContent></div>
                                   </div>
                                 )}
                               </div>
@@ -3565,7 +3642,7 @@ export default function App() {
                                     />
                                   ) : (
                                     <div className="prose prose-invert prose-xs max-w-none">
-                                      <div className="markdown-body"><ReactMarkdown>{entry.content}</ReactMarkdown></div>
+                                      <div className="markdown-body"><MarkdownContent>{entry.content}</MarkdownContent></div>
                                     </div>
                                   )}
                                 </div>
@@ -3602,7 +3679,7 @@ export default function App() {
                                   />
                                 ) : (
                                   <div className="prose prose-invert prose-xs max-w-none">
-                                    <div className="markdown-body"><ReactMarkdown>{extractionResult2}</ReactMarkdown></div>
+                                    <div className="markdown-body"><MarkdownContent>{extractionResult2}</MarkdownContent></div>
                                   </div>
                                 )}
                               </div>
@@ -3693,7 +3770,9 @@ export default function App() {
                          <div className="text-right">DISPATCH</div>
                       </div>
                       <div className="flex-1 overflow-y-auto custom-scrollbar">
-                         {jobs.map((job, idx) => (
+                         {jobs.map((job, idx) => {
+                            const jobAttributeSet = readSkuAttributeSetForDisplay(job);
+                            return (
                             <div key={idx} className="data-table-row grid min-h-14 grid-cols-[1fr_8fr_8fr_6fr_5fr_4fr_4fr] items-center px-6">
                                <div className="flex items-center">
                                  <input 
@@ -3709,7 +3788,7 @@ export default function App() {
                                </div>
                                <div className="text-[11px] font-mono text-blue-500 font-bold">{job.sku}</div>
                                <div className="text-[11px] font-medium text-white/80 truncate pr-6">{job.title || 'Unknown Product Entity'}</div>
-                               <div className="text-[10px] font-bold text-blue-400/60 uppercase tracking-tighter truncate">{job.attribute_set || job.Attribute_Set || 'DEFAULT'}</div>
+                               <div className="text-[10px] font-bold text-blue-400/60 uppercase tracking-tighter truncate">{jobAttributeSet || 'DEFAULT'}</div>
                                <div className="flex flex-col justify-center gap-1 text-[10px] font-mono">
                                  {job.harvestFile && (
                                    <div className="flex items-center gap-2">
@@ -3831,7 +3910,7 @@ export default function App() {
                                   ))}
                               </div>
                            </div>
-                        ))}
+                        )})}
                         {jobs.length === 0 && (
                           <EmptyState
                             icon={<Briefcase className="h-8 w-8" />}
@@ -3863,18 +3942,20 @@ export default function App() {
                     </div>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 overflow-y-auto custom-scrollbar flex-1 pb-10">
-                     {skuIndex.map((sku, i) => (
+                     {skuIndex.map((sku, i) => {
+                        const skuAttributeSet = readSkuAttributeSetForDisplay(sku);
+                        return (
                         <div key={i} className="p-5 rounded-2xl border border-white/5 bg-black/40 hover:border-blue-500/20 transition-all group relative overflow-hidden">
                            <div className="absolute top-0 right-0 p-3 opacity-0 group-hover:opacity-100 transition-opacity"><Zap className="w-4 h-4 text-blue-500/40" /></div>
                            <div className="px-2 py-1 bg-blue-600/10 border border-blue-500/20 rounded text-[10px] font-mono text-blue-400 font-bold mb-3 inline-block">{sku.sku || sku.SKU}</div>
                            <div className="text-xs font-bold text-white/90 line-clamp-2 min-h-[32px] leading-relaxed italic">{sku.title || sku.Name || 'Unlabeled Record'}</div>
                            <div className="mt-4 pt-4 border-t border-white/[0.03] grid grid-cols-2 gap-2">
                               <div className="flex flex-col"><span className="text-[8px] text-white/20 uppercase font-bold">Category</span><span className="text-[10px] text-white/70 truncate">{sku.category || 'N/A'}</span></div>
-                              <div className="flex flex-col"><span className="text-[8px] text-white/20 uppercase font-bold">Protocol</span><span className="text-[10px] text-blue-400 font-bold truncate uppercase">{sku.attribute_set || sku.Attribute_Set || 'DEFAULT'}</span></div>
+                              <div className="flex flex-col"><span className="text-[8px] text-white/20 uppercase font-bold">Protocol</span><span className="text-[10px] text-blue-400 font-bold truncate uppercase">{skuAttributeSet || 'DEFAULT'}</span></div>
                               <div className="flex flex-col"><span className="text-[8px] text-white/20 uppercase font-bold">Brand</span><span className="text-[10px] text-white/70 truncate">{sku.brand || 'N/A'}</span></div>
                            </div>
                         </div>
-                     ))}
+                     )})}
                      {skuIndex.length === 0 && (
                        <EmptyState
                          icon={<Database className="h-8 w-8" />}
@@ -4310,7 +4391,7 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="max-w-none prose prose-invert prose-blue prose-sm markdown-body">
-                    <ReactMarkdown>{modalHarvestContent}</ReactMarkdown>
+                    <MarkdownContent>{modalHarvestContent}</MarkdownContent>
                   </div>
                 )}
               </div>
