@@ -143,9 +143,9 @@ fuser -k 3000/tcp 24678/tcp 2>/dev/null; npm run dev
 | `CORS_ORIGINS` | Only for cross-origin UI | Comma-separated allowed browser origins; `*` is blocked in production |
 | `COOKIE_SAME_SITE` | No | Auth cookie policy: `strict` (default), `lax`, or `none` for cross-origin frontend/API |
 | `COOKIE_SECURE` | No | Cookie `Secure` flag (`true` in production; required when `COOKIE_SAME_SITE=none`) |
-| `TRUST_PROXY` | No | Set `true` behind reverse proxies / load balancers (recommended in production) |
+| `TRUST_PROXY` | No | Keep `false` for direct NAT/container deployments. Set `true` only behind a trusted reverse proxy/load balancer. |
 | `INSTALL_PLAYWRIGHT` | No | Set `false` to skip Playwright browser install during `npm install` |
-| `MAX_CONCURRENT_BROWSER_TASKS` | No | Max parallel browser sessions (default `2`) |
+| `MAX_CONCURRENT_BROWSER_TASKS` | No | Max parallel browser sessions (default `1`, recommended cap `2` on 2GB RAM) |
 
 
 > **Security:** Never commit Firebase service account files, `.env`, `AI_CREDITS_API_KEY`, `SESSION_SECRET`, or `AUTH_LOGIN_CODE` to version control. Use environment variables in all deployed environments.
@@ -194,16 +194,22 @@ Mount these paths if you need files to survive container restarts:
 docker build -t moosstudioza .
 
 # Run
-docker run -p 3000:3000 \
+docker run -p 38080:3000 \
   -e AI_CREDITS_API_KEY=replace_with_ai_credits_key \
   -e SESSION_SECRET=replace_with_32_plus_char_secret \
   -e AUTH_LOGIN_CODE=replace_with_private_internal_code \
   -e COOKIE_SAME_SITE=strict \
   -e COOKIE_SECURE=true \
-  -e TRUST_PROXY=true \
+  -e TRUST_PROXY=false \
+  -e MAX_CONCURRENT_BROWSER_TASKS=1 \
   -e FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}' \
+  -v /opt/moosstudio/harvest:/app/harvest \
+  -v /opt/moosstudio/outputs:/app/outputs \
+  -v /opt/moosstudio/images:/app/public/images \
   moosstudioza
 ```
+
+On NAT VPS hosts, keep the app listening internally on container port `3000` and map the public host-assigned port to `3000` (example above uses host port `38080`).
 
 ---
 
