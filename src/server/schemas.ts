@@ -5,10 +5,10 @@ import { z } from 'zod';
 export const ScrapeRequestSchema = z.object({
   url: z.string().url('Invalid URL'),
   selector: z.string().optional(),
-  extractWithGroq: z.boolean().optional(),
+  extractWithAI: z.boolean().optional(),
   enableScreenshot: z.boolean().optional(),
   strategy: z
-    .enum(['default', 'GroqExtractionStrategy', 'JsonLdExtractionStrategy', 'WholeCaptureStrategy'])
+    .enum(['default', 'AIExtractionStrategy', 'JsonLdExtractionStrategy', 'WholeCaptureStrategy'])
     .optional(),
   deepScroll: z.boolean().optional(),
   secondaryTarget: z
@@ -41,13 +41,14 @@ export const SKUIndexRequestSchema = z.object({
 });
 
 export const SettingsRequestSchema = z.object({
-  groqApiKey: z.string().optional(),
+  aiCreditsApiKey: z.string().optional(),
   schemas: z.record(z.any()).optional(),
   selectors: z.record(z.any()).optional(),
 });
 
 export const LoginRequestSchema = z.object({
   email: z.string().email('Valid email is required'),
+  accessCode: z.string().min(1, 'Access code is required').max(200, 'Access code is too long'),
 });
 
 export const AllowlistUpsertRequestSchema = z.object({
@@ -87,10 +88,10 @@ const IdempotencyKeySchema = z
 export const V2ScrapeRequestSchema = z.object({
   url: z.string().url('Invalid URL').max(2048),
   selector: z.string().max(500).optional(),
-  extractWithGroq: z.boolean().optional(),
+  extractWithAI: z.boolean().optional(),
   enableScreenshot: z.boolean().optional(),
   strategy: z
-    .enum(['default', 'GroqExtractionStrategy', 'JsonLdExtractionStrategy', 'WholeCaptureStrategy'])
+    .enum(['default', 'AIExtractionStrategy', 'JsonLdExtractionStrategy', 'WholeCaptureStrategy'])
     .optional(),
   deepScroll: z.boolean().optional(),
   sku: z.string().min(1).max(100).optional(),
@@ -118,7 +119,7 @@ export const V2MappingRequestSchema = z.object({
 });
 
 export const V2ExportRequestSchema = z.object({
-  format: z.enum(['xls', 'xlsx']).default('xls'),
+  format: z.enum(['xlsx']).default('xlsx'),
   /** Optional explicit SKU filter. Omit to export all outputs. */
   skus: z.array(z.string().min(1).max(100)).max(1000).optional(),
   idempotencyKey: IdempotencyKeySchema,

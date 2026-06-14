@@ -89,5 +89,65 @@
     "ean": "6942103196669",
     "shipping_weight": 400,
     "product_type": "Smartphone"
+  },
+  {
+    "sku": "123_Test",
+    "brand": "Lenovo",
+    "ean": "35423562362",
+    "shipping_weight": "2300",
+    "product_type": "Laptop",
+    "attribute_set": "Elec-C&A-Laptops",
+    "base_code": "123_Test",
+    "sap_data": ""
+  },
+  {
+    "sku": "1231",
+    "brand": "",
+    "ean": "",
+    "shipping_weight": "",
+    "product_type": "",
+    "attribute_set": "Elec-C&A-Laptops",
+    "base_code": "",
+    "sap_data": ""
+  },
+  {
+    "sku": "121",
+    "brand": "",
+    "ean": "",
+    "shipping_weight": "",
+    "product_type": "",
+    "attribute_set": "Elec-C&A-Laptops",
+    "base_code": "",
+    "sap_data": ""
+  },
+  {
+    "sku": "54",
+    "brand": "",
+    "ean": "",
+    "shipping_weight": "",
+    "product_type": "",
+    "attribute_set": "Elec-M&W-Smartphones & Tablets",
+    "base_code": "",
+    "sap_data": ""
+  },
+  {
+    "sku": "12331",
+    "brand": "",
+    "ean": "",
+    "shipping_weight": "",
+    "product_type": "",
+    "attribute_set": "Elec-M&W-MA-Power Banks",
+    "base_code": "",
+    "sap_data": ""
+  },
+  {
+    "sku": "12311111",
+    "brand": "",
+    "ean": "",
+    "shipping_weight": "",
+    "product_type": "",
+    "attribute_set": "Elec-M&W-Smartphones & Tablets",
+    "base_code": "",
+    "sap_data": ""
   }
 ]

@@ -13,7 +13,7 @@
 
 ## What is MoosStudio?
 
-MoosStudio is a full-stack product content automation platform built for e-commerce teams. It scrapes product pages using a stealth browser, structures raw data against configurable attribute sets, enriches content with an LLM (Groq), and exports ready-to-import XLSX or JSON files.
+MoosStudio is a full-stack product content automation platform built for e-commerce teams. It scrapes product pages using a stealth browser, structures raw data against configurable attribute sets, enriches content with an LLM (AI Credits - OpenAI compatible), and exports ready-to-import XLSX or JSON files.
 
 ### Key Capabilities
   
@@ -21,13 +21,13 @@ MoosStudio is a full-stack product content automation platform built for e-comme
 |---|---|
 | **Stealth Scraping** | CloakBrowser (Chromium) with Playwright fallback — bypasses most bot-detection |
 | **Product Discovery** | Crawl a PLP to pull all product URLs automatically |
-| **AI Enrichment** | Groq LLM maps scraped data to configurable attribute schemas |
+| **AI Enrichment** | AI Credits LLM (DeepSeek/Qwen) maps scraped data to configurable attribute schemas |
 | **Image Extraction** | Downloads, resizes, and stores product images via Sharp |
 | **PDF Upload** | Parse supplier PDFs and extract structured product data |
 | **Batch Jobs** | Queue and run multi-SKU enrichment jobs with live progress logs |
 | **XLSX / JSON Export** | One-click exports formatted for catalogue import |
 | **Firestore Sync** | All data optionally mirrors to Firebase Firestore in real time |
-| **Auth & Roles** | Email allowlist + role-based session auth (`admin` / `user`) on all `/api/*` routes |
+| **Auth & Roles** | Email allowlist + internal access code + signed role-based sessions (`admin` / `user`) on all `/api/*` routes |
 
 ---
 
@@ -36,7 +36,7 @@ MoosStudio is a full-stack product content automation platform built for e-comme
 - **Frontend** — React 19, Vite, Tailwind CSS v4, Framer Motion
 - **Backend** — Node.js, Express, TypeScript (tsx)
 - **Browser Automation** — CloakBrowser, Playwright Chromium
-- **AI** — Groq SDK (LLaMA / Mixtral)
+- **AI** — OpenAI SDK (compatible with AI Credits API - DeepSeek / Qwen models)
 - **Database** — Firebase Admin SDK + Firestore
 - **Storage** — Local filesystem (with optional Firestore mirror)
 - **Containerisation** — Docker (multi-stage, Playwright base image)
@@ -107,7 +107,7 @@ MoosStudio is a full-stack product content automation platform built for e-comme
 
 ## Local Development
 
-**Prerequisites:** Node.js 20+, Docker (optional)
+**Prerequisites:** Node.js 22.12.0 or newer, Docker (optional)
 
 ```bash
 # 1. Install dependencies (also installs Playwright Chromium)
@@ -115,7 +115,7 @@ npm install
 
 # 2. Add your environment variables
 cp .env.example .env
-# Set GROQ_API_KEY and optionally FIREBASE_SERVICE_ACCOUNT_JSON
+# Set AI_CREDITS_API_KEY and optionally FIREBASE_SERVICE_ACCOUNT_JSON
 
 # 3. Start the dev server (hot-reload via Vite)
 npm run dev
@@ -135,13 +135,14 @@ fuser -k 3000/tcp 24678/tcp 2>/dev/null; npm run dev
 
 | Variable | Required | Description |
 |---|---|---|
-| `GROQ_API_KEY` | Yes | Groq API key for LLM enrichment |
+| `AI_CREDITS_API_KEY` | Yes | AI Credits API key for LLM enrichment (https://api.aicredits.in) |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | Recommended | Full Firebase service account JSON as a single string |
 | `FIRESTORE_MODE` | No | `all` (default) · `outputs-only` · `off` |
 | `NODE_ENV` | No | `production` in deployed environments |
 | `PORT` | No | Server port (default `3000`) |
 | `SESSION_SECRET` | Yes in production | Required for signed auth sessions; minimum 32 characters |
-| `CORS_ORIGINS` | Recommended for cross-origin UI | Comma-separated allowed browser origins (set `*` only in trusted internal networks) |
+| `AUTH_LOGIN_CODE` | Yes in production | Shared private access code required in addition to allowlisted email; minimum 12 characters |
+| `CORS_ORIGINS` | Only for cross-origin UI | Comma-separated allowed browser origins; `*` is blocked in production |
 | `COOKIE_SAME_SITE` | No | Auth cookie policy: `strict` (default), `lax`, or `none` for cross-origin frontend/API |
 | `COOKIE_SECURE` | No | Cookie `Secure` flag (`true` in production; required when `COOKIE_SAME_SITE=none`) |
 | `TRUST_PROXY` | No | Set `true` behind reverse proxies / load balancers (recommended in production) |
@@ -149,7 +150,7 @@ fuser -k 3000/tcp 24678/tcp 2>/dev/null; npm run dev
 | `MAX_CONCURRENT_BROWSER_TASKS` | No | Max parallel browser sessions (default `2`) |
 
 
-> **Security:** Never commit `firebase-service-account.json` or `GROQ_API_KEY` to version control. Use environment variables in all deployed environments.
+> **Security:** Never commit Firebase service account files, `.env`, `AI_CREDITS_API_KEY`, `SESSION_SECRET`, or `AUTH_LOGIN_CODE` to version control. Use environment variables in all deployed environments.
 
 ---
 
@@ -160,11 +161,12 @@ Use the included multi-stage `Dockerfile` on any Docker-compatible host (VPS, Ra
 ### Required runtime environment
 
 1. Ensure `settings/allowlist.json` has at least one `admin` user email.
-2. Set `GROQ_API_KEY` if AI enrichment is needed.
+2. Set `AI_CREDITS_API_KEY` if AI enrichment is needed.
 3. Set `SESSION_SECRET` (32+ chars) for signed auth sessions.
-4. Set `FIREBASE_SERVICE_ACCOUNT_JSON` for Firestore access.
-5. Set `CORS_ORIGINS` when frontend is served from a different origin.
-6. If frontend and API are on different domains, set `COOKIE_SAME_SITE=none` and `COOKIE_SECURE=true`.
+4. Set `AUTH_LOGIN_CODE` (12+ chars) and share it only with approved users.
+5. Set `FIREBASE_SERVICE_ACCOUNT_JSON` for Firestore access.
+6. Set `CORS_ORIGINS` only when frontend is served from a different origin.
+7. If frontend and API are on different domains, set `COOKIE_SAME_SITE=none` and `COOKIE_SECURE=true`.
 
 ### Recommended runtime settings
 
@@ -195,10 +197,10 @@ docker build -t moosstudioza .
 
 # Run
 docker run -p 3000:3000 \
-  -e GROQ_API_KEY=your_key \
+  -e AI_CREDITS_API_KEY=replace_with_ai_credits_key \
   -e SESSION_SECRET=replace_with_32_plus_char_secret \
-  -e CORS_ORIGINS=https://your-frontend-domain.com \
-  -e COOKIE_SAME_SITE=none \
+  -e AUTH_LOGIN_CODE=replace_with_private_internal_code \
+  -e COOKIE_SAME_SITE=strict \
   -e COOKIE_SECURE=true \
   -e TRUST_PROXY=true \
   -e FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}' \

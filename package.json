@@ -4,19 +4,18 @@
   "version": "0.0.0",
   "type": "module",
   "engines": {
-    "node": "20.x"
+    "node": ">=22.12.0"
   },
   "scripts": {
-    "dev": "tsx server.ts",
-    "postinstall": "if [ \"${INSTALL_PLAYWRIGHT:-true}\" = \"true\" ]; then playwright install-deps chromium && playwright install chromium; else echo 'Skipping Playwright browser install (INSTALL_PLAYWRIGHT=false)'; fi",
+    "dev": "node scripts/run-server.mjs",
+    "postinstall": "node scripts/install-playwright.mjs",
     "build": "vite build",
-    "start": "NODE_ENV=production tsx server.ts",
-    "start:prod": "NODE_ENV=production tsx server.ts",
+    "start": "cross-env NODE_ENV=production node scripts/run-server.mjs",
+    "start:prod": "cross-env NODE_ENV=production node scripts/run-server.mjs",
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "smoke": "tsx scripts/smoke-test.ts",
-    "smoke:whole-capture": "tsx scripts/whole-capture-smoke.ts"
+    "smoke": "tsx scripts/smoke-test.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.1.14",
@@ -28,10 +27,11 @@
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.6",
     "dotenv": "^17.2.3",
+    "exceljs": "^4.4.0",
     "express": "^4.21.2",
     "firebase": "^12.12.1",
-    "firebase-admin": "^13.8.0",
-    "groq-sdk": "^1.1.2",
+    "firebase-admin": "^14.0.0",
+    "openai": "^4.28.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "multer": "^2.1.1",
@@ -42,11 +42,9 @@
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
     "sharp": "^0.34.5",
-    "tsx": "^4.21.0",
+    "tsx": "^4.22.4",
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2",
-    "vite": "^6.2.0",
-    "xlsx": "^0.18.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -59,7 +57,11 @@
     "autoprefixer": "^10.4.21",
     "cross-env": "^10.1.0",
     "tailwindcss": "^4.1.14",
+    "ts-node": "^10.9.2",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "vite": "^8.0.16"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

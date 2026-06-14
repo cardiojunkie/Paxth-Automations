@@ -1,6 +1,8 @@
 import { apiFetch, setCsrfToken } from "./auth";
+import { AppShell, type AppShellNavItem } from "./components/layout/AppShell";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PresetDropdown } from "./components/PresetDropdown";
+import { Alert, Badge, Button, Card, EmptyState, Input, LoadingState, Progress, Select, Tabs, Textarea } from "./components/ui";
 import type { SkuRecord, HarvestFile, Job } from "./types";
 /**
  * @license
@@ -11,7 +13,7 @@ import { Activity, Beaker, Box, Cpu, Database, ExternalLink, Flame, Info, Layout
 import { motion, AnimatePresence } from 'motion/react';
 import React, { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import * as XLSX from 'xlsx';
+import * as ExcelJS from 'exceljs';
 
 // ErrorBoundary and PresetDropdown are imported from ./components/
 // Types LogEntry and FirestoreHealth are defined here for local use in App.tsx
@@ -62,9 +64,84 @@ interface HarvestEditorEntry {
   openedAt: string;
 }
 
+type ModuleId = 'sku-indexer' | 'scrapper' | 'jobs' | 'images' | 'settings';
+type SettingsSubModuleId = 'api' | 'mapping' | 'indexer';
+
 const SCRAPE_JOB_POLL_TIMEOUT_MS = 600_000;
 const DISCOVERY_JOB_POLL_TIMEOUT_MS = 120_000;
 const BATCH_TEMPLATE_HEADERS = ['sku', 'url'];
+const DEFAULT_MAP_AI_MODELS = [
+  'deepseek/deepseek-v4-flash',
+  'deepseek/deepseek-v4-pro',
+  'qwen/qwen3.5-flash-02-23',
+] as const;
+const CUSTOM_MAP_AI_MODEL_VALUE = 'custom';
+const MAP_AI_MISSING_MODEL_MESSAGE = 'Please select or enter a model for Map AI.';
+type SpreadsheetCell = string | number | boolean | null;
+
+function normalizeExcelCellValue(value: ExcelJS.CellValue): SpreadsheetCell {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value !== 'object') return value as SpreadsheetCell;
+  const complex = value as any;
+  if (complex.result !== undefined) return normalizeExcelCellValue(complex.result);
+  if (complex.text !== undefined) return String(complex.text);
+  if (Array.isArray(complex.richText)) {
+    return complex.richText.map((part: any) => part?.text || '').join('');
+  }
+  return String(value);
+}
+
+async function readFirstWorksheetRows(file: File): Promise<SpreadsheetCell[][]> {
+  const workbook = new ExcelJS.Workbook();
+  await workbook.xlsx.load(await file.arrayBuffer());
+  const worksheet = workbook.worksheets[0];
+  if (!worksheet) return [];
+  const rows: SpreadsheetCell[][] = [];
+  worksheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
+    const values: SpreadsheetCell[] = [];
+    for (let col = 1; col <= worksheet.columnCount; col += 1) {
+      values.push(normalizeExcelCellValue(row.getCell(col).value));
+    }
+    rows[rowNumber - 1] = values;
+  });
+  return rows.filter((row) => row.some((cell) => cell !== null && cell.toString().trim() !== ''));
+}
+
+async function readFirstWorksheetObjects(file: File): Promise<Record<string, SpreadsheetCell>[]> {
+  const rows = await readFirstWorksheetRows(file);
+  if (rows.length === 0) return [];
+  const headers = rows[0].map((cell) => cell?.toString().trim() || '');
+  return rows.slice(1).map((row) => {
+    const record: Record<string, SpreadsheetCell> = {};
+    headers.forEach((header, index) => {
+      if (!header) return;
+      record[header] = row[index] ?? null;
+    });
+    return record;
+  }).filter((row) => Object.values(row).some((cell) => cell !== null && cell.toString().trim() !== ''));
+}
+
+async function downloadXlsxTemplate(filename: string, sheetName: string, headers: string[]) {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet(sheetName);
+  worksheet.addRow(headers);
+  worksheet.addRow(headers.map(() => ''));
+  worksheet.getRow(1).font = { bold: true };
+  worksheet.columns.forEach((column, index) => {
+    column.width = Math.min(Math.max(headers[index]?.length + 4 || 12, 12), 42);
+  });
+  const buffer = await workbook.xlsx.writeBuffer();
+  const blob = new Blob([buffer as ArrayBuffer], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
 const HARVEST_IMAGE_SECTION_HEADINGS = new Set([
   '### MEDIA SOURCE ASSETS (PLAINTEXT URLs):',
   '## High Quality Product Image URLs',
@@ -195,8 +272,8 @@ export default function App() {
     { name: "Standard Product List", selector: ".product-item a, .product-card a" }
   ];
 
-  const [currentModule, setCurrentModule] = useState<'sku-indexer' | 'scrapper' | 'jobs' | 'images' | 'settings'>('scrapper');
-  const [settingsSubModule, setSettingsSubModule] = useState<'api' | 'mapping' | 'indexer'>('api');
+  const [currentModule, setCurrentModule] = useState<ModuleId>('scrapper');
+  const [settingsSubModule, setSettingsSubModule] = useState<SettingsSubModuleId>('api');
   const [editingGenerator, setEditingGenerator] = useState<string | null>(null);
   const [editingSetRules, setEditingSetRules] = useState<number | null>(null);
   const [skuIndex, setSkuIndex] = useState<SkuRecord[]>([]);
@@ -207,7 +284,7 @@ export default function App() {
     bullets: "", 
     description: "", 
     keywords: "",
-    groqApiKey: "",
+    aiCreditsApiKey: "",
     attributeSets: [] as {name: string, fields: string[], mdRules?: string, mdFileName?: string}[],
     selectorPresets: [] as {name: string, selector: string, strategy: string}[],
     plpSelectorPresets: [] as {name: string, selector: string}[]
@@ -215,6 +292,7 @@ export default function App() {
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [isAuthChecking, setIsAuthChecking] = useState(true);
   const [loginEmail, setLoginEmail] = useState('');
+  const [loginAccessCode, setLoginAccessCode] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [allowlistUsers, setAllowlistUsers] = useState<AllowlistUser[]>([]);
   const [newUserEmail, setNewUserEmail] = useState('');
@@ -389,6 +467,7 @@ export default function App() {
   const [selectedJobs, setSelectedJobs] = useState<string[]>([]);
   const [selectedSkuIndexItems, setSelectedSkuIndexItems] = useState<string[]>([]);
   const [jobAiModels, setJobAiModels] = useState<{[sku:string]: string}>({});
+  const [customJobAiModels, setCustomJobAiModels] = useState<{[sku:string]: string}>({});
   // Pagination state for the Jobs module
   const [jobsSearch, setJobsSearch] = useState('');
   const [jobsNextCursor, setJobsNextCursor] = useState<string | null>(null);
@@ -429,12 +508,12 @@ export default function App() {
     }
   };
 
-  const loginWithEmail = async (email: string) => {
+  const loginWithEmail = async (email: string, accessCode: string) => {
     try {
       const res = await apiFetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email }),
+        body: JSON.stringify({ email, accessCode }),
         credentials: 'include'
       });
       if (!res.ok) return false;
@@ -455,13 +534,18 @@ export default function App() {
       addLog('error', 'Email is required.');
       return;
     }
+    if (!loginAccessCode.trim()) {
+      addLog('error', 'Access code is required.');
+      return;
+    }
     setIsLoggingIn(true);
-    const ok = await loginWithEmail(loginEmail.trim().toLowerCase());
+    const ok = await loginWithEmail(loginEmail.trim().toLowerCase(), loginAccessCode);
     setIsLoggingIn(false);
     if (ok) {
+      setLoginAccessCode('');
       addLog('success', 'Logged in successfully.');
     } else {
-      addLog('error', 'Login failed. Ensure your email is in allowlist.');
+      addLog('error', 'Login failed. Check your email and access code.');
     }
   };
 
@@ -819,83 +903,72 @@ export default function App() {
     addLog('success', `PLP Preset "${tempPlpSelectorName}" saved.`);
   };
 
-  const handleBatchUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleBatchUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setBatchFile(file);
-    
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      try {
-        const bstr = evt.target?.result;
-        const wb = XLSX.read(bstr, { type: 'binary' });
-        const wsname = wb.SheetNames[0];
-        const ws = wb.Sheets[wsname];
-        const rows = XLSX.utils.sheet_to_json<(string | number | boolean | null)[]>(ws, {
-          header: 1,
-          defval: '',
-        }) as (string | number | boolean | null)[][];
 
-        if (rows.length === 0) {
-          throw new Error('The manifest is empty.');
-        }
+    try {
+      const rows = await readFirstWorksheetRows(file);
 
-        const headerRow = rows[0].map((cell) => cell?.toString().trim().toLowerCase());
-        const skuIndex = headerRow.indexOf('sku');
-        const urlIndex = headerRow.indexOf('url');
-
-        if (skuIndex === -1 || urlIndex === -1) {
-          throw new Error('The manifest must include sku and url headers.');
-        }
-
-        const parsed: BatchManifestRow[] = [];
-        const invalidRows: number[] = [];
-
-        rows.slice(1).forEach((row, idx) => {
-          const sku = row[skuIndex]?.toString().trim() || '';
-          const itemUrl = row[urlIndex]?.toString().trim() || '';
-          const rowIsEmpty = row.every((cell) => !cell?.toString().trim());
-
-          if (rowIsEmpty) return;
-
-          if (!sku || !itemUrl) {
-            invalidRows.push(idx + 2);
-            return;
-          }
-
-          parsed.push({ sku, url: itemUrl });
-        });
-
-        if (invalidRows.length > 0) {
-          throw new Error(`Rows ${invalidRows.join(', ')} are missing a sku or url value.`);
-        }
-
-        if (parsed.length === 0) {
-          throw new Error('No valid sku/url rows were found in the manifest.');
-        }
-
-        const seenSkus = new Set<string>();
-        const duplicateSkus: string[] = [];
-        parsed.forEach((item) => {
-          if (seenSkus.has(item.sku) && !duplicateSkus.includes(item.sku)) {
-            duplicateSkus.push(item.sku);
-            return;
-          }
-          seenSkus.add(item.sku);
-        });
-
-        if (duplicateSkus.length > 0) {
-          throw new Error(`Duplicate sku values are not allowed: ${duplicateSkus.join(', ')}`);
-        }
-
-        setBatchData(parsed);
-        addLog('success', `Loaded ${parsed.length} items from batch file.`);
-      } catch (err: any) {
-        setBatchData([]);
-        addLog('error', err?.message || 'Failed to parse Excel file. Ensure columns are sku and url.');
+      if (rows.length === 0) {
+        throw new Error('The manifest is empty.');
       }
-    };
-    reader.readAsBinaryString(file);
+
+      const headerRow = rows[0].map((cell) => cell?.toString().trim().toLowerCase());
+      const skuIndex = headerRow.indexOf('sku');
+      const urlIndex = headerRow.indexOf('url');
+
+      if (skuIndex === -1 || urlIndex === -1) {
+        throw new Error('The manifest must include sku and url headers.');
+      }
+
+      const parsed: BatchManifestRow[] = [];
+      const invalidRows: number[] = [];
+
+      rows.slice(1).forEach((row, idx) => {
+        const sku = row[skuIndex]?.toString().trim() || '';
+        const itemUrl = row[urlIndex]?.toString().trim() || '';
+        const rowIsEmpty = row.every((cell) => !cell?.toString().trim());
+
+        if (rowIsEmpty) return;
+
+        if (!sku || !itemUrl) {
+          invalidRows.push(idx + 2);
+          return;
+        }
+
+        parsed.push({ sku, url: itemUrl });
+      });
+
+      if (invalidRows.length > 0) {
+        throw new Error(`Rows ${invalidRows.join(', ')} are missing a sku or url value.`);
+      }
+
+      if (parsed.length === 0) {
+        throw new Error('No valid sku/url rows were found in the manifest.');
+      }
+
+      const seenSkus = new Set<string>();
+      const duplicateSkus: string[] = [];
+      parsed.forEach((item) => {
+        if (seenSkus.has(item.sku) && !duplicateSkus.includes(item.sku)) {
+          duplicateSkus.push(item.sku);
+          return;
+        }
+        seenSkus.add(item.sku);
+      });
+
+      if (duplicateSkus.length > 0) {
+        throw new Error(`Duplicate sku values are not allowed: ${duplicateSkus.join(', ')}`);
+      }
+
+      setBatchData(parsed);
+      addLog('success', `Loaded ${parsed.length} items from batch file.`);
+    } catch (err: any) {
+      setBatchData([]);
+      addLog('error', err?.message || 'Failed to parse Excel file. Ensure columns are sku and url.');
+    }
   };
 
   const handleBatchScrape = async () => {
@@ -923,7 +996,7 @@ export default function App() {
             body: JSON.stringify({ 
               url: item.url, 
               selector, 
-              extractWithGroq: strategy === 'GroqExtractionStrategy',
+              extractWithAI: strategy === 'AIExtractionStrategy',
               strategy,
               enableScreenshot: screenshotEnabled,
               deepScroll: deepScrollEnabled,
@@ -943,11 +1016,11 @@ export default function App() {
           const data = await pollJob(jobId, SCRAPE_JOB_POLL_TIMEOUT_MS);
 
           if (strategy === 'LLMExtractionStrategy') {
-            addLog('error', 'Advanced Extraction Strategy is currently suspended for deployment. Please use Groq Strategy.');
+            addLog('error', 'Advanced Extraction Strategy is currently suspended. Please use AI Credits (DeepSeek/Qwen) for active synthesis.');
             throw new Error('Advanced Strategy Suspended');
           }
 
-          if (!(data.groqResult || data.text)) {
+          if (!(data.aiResult || data.text)) {
             throw new Error('Scrape completed without harvest content.');
           }
 
@@ -973,77 +1046,68 @@ export default function App() {
     setProgress(100);
   };
 
-  const handleSkuUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleSkuUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setSkuFile(file);
-    const reader = new FileReader();
-    reader.onload = async (evt) => {
-      try {
-        const bstr = evt.target?.result;
-        const wb = XLSX.read(bstr, { type: 'binary' });
-        const wsname = wb.SheetNames[0];
-        let data = XLSX.utils.sheet_to_json(wb.Sheets[wsname]);
 
-        // Sanitize headers to ensure compatibility (sku, brand, ean, shipping_weight, product_type, attribute_set)
-        data = (data as any[]).map(item => {
-           const normalized: any = {};
-           Object.keys(item).forEach(key => {
-              const lowerKey = key.toLowerCase().trim().replace(/ /g, '_');
-              normalized[lowerKey] = item[key];
-           });
-           return normalized;
-        });
+    try {
+      let data = await readFirstWorksheetObjects(file);
 
-        // Map XLS column names to internal field names
-        const XLS_COLUMN_MAP: Record<string, string> = {
-          attributes__lulu_ean: 'ean',
-          attributes__shipping_weight: 'shipping_weight',
-          attributes__lulu_product_type: 'product_type',
-        };
-        data = (data as any[]).map(item => {
-          const mapped: any = { ...item };
-          Object.entries(XLS_COLUMN_MAP).forEach(([from, to]) => {
-            if (from in mapped) {
-              mapped[to] = mapped[from];
-              delete mapped[from];
-            }
-          });
-          return mapped;
-        });
+      // Sanitize headers to ensure compatibility (sku, brand, ean, shipping_weight, product_type, attribute_set)
+      data = data.map(item => {
+         const normalized: any = {};
+         Object.keys(item).forEach(key => {
+            const lowerKey = key.toLowerCase().trim().replace(/ /g, '_');
+            normalized[lowerKey] = item[key];
+         });
+         return normalized;
+      });
 
-        // Save to backend
-        const res = await apiFetch('/api/sku/index', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ data })
+      // Map XLS column names to internal field names
+      const XLS_COLUMN_MAP: Record<string, string> = {
+        attributes__lulu_ean: 'ean',
+        attributes__shipping_weight: 'shipping_weight',
+        attributes__lulu_product_type: 'product_type',
+      };
+      data = data.map(item => {
+        const mapped: any = { ...item };
+        Object.entries(XLS_COLUMN_MAP).forEach(([from, to]) => {
+          if (from in mapped) {
+            mapped[to] = mapped[from];
+            delete mapped[from];
+          }
         });
-        if (res.ok) {
-           const idxRes = await apiFetch('/api/sku/index');
-           const refreshedIdx = await idxRes.json();
-           setSkuIndex(Array.isArray(refreshedIdx) ? refreshedIdx : []);
-           addLog('success', `SKU Indexer synced with ${data.length} records (merged with existing).`);
-        }
-      } catch (err) {
-        addLog('error', 'SKU Indexing failed.');
+        return mapped;
+      });
+
+      // Save to backend
+      const res = await apiFetch('/api/sku/index', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data })
+      });
+      if (res.ok) {
+         const idxRes = await apiFetch('/api/sku/index');
+         const refreshedIdx = await idxRes.json();
+         setSkuIndex(Array.isArray(refreshedIdx) ? refreshedIdx : []);
+         addLog('success', `SKU Indexer synced with ${data.length} records (merged with existing).`);
+      } else {
+         const payload = await res.json().catch(() => null);
+         throw new Error(payload?.error || 'Upload rejected.');
       }
-    };
-    reader.readAsBinaryString(file);
+    } catch (err: any) {
+      addLog('error', err?.message || 'SKU Indexing failed.');
+    }
   };
 
-  const handleDownloadSkuTemplate = () => {
+  const handleDownloadSkuTemplate = async () => {
     const headers = ['sku', 'base_code', 'brand', 'attributes__lulu_ean', 'attributes__shipping_weight', 'attributes__lulu_product_type', 'sap_data', 'attribute_Set'];
-    const ws = XLSX.utils.aoa_to_sheet([headers, Array(headers.length).fill('')]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'SKU Template');
-    XLSX.writeFile(wb, 'sku_index_template.xlsx');
+    await downloadXlsxTemplate('sku_index_template.xlsx', 'SKU Template', headers);
   };
 
-  const handleDownloadBatchTemplate = () => {
-    const ws = XLSX.utils.aoa_to_sheet([BATCH_TEMPLATE_HEADERS, Array(BATCH_TEMPLATE_HEADERS.length).fill('')]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Batch Manifest');
-    XLSX.writeFile(wb, 'batch_manifest_template.xlsx');
+  const handleDownloadBatchTemplate = async () => {
+    await downloadXlsxTemplate('batch_manifest_template.xlsx', 'Batch Manifest', BATCH_TEMPLATE_HEADERS);
   };
 
   const handleSkuDelete = async (sku: string) => {
@@ -1439,7 +1503,7 @@ export default function App() {
       const requestBody: any = { 
         url, 
         selector,
-        extractWithGroq: strategy === 'GroqExtractionStrategy',
+        extractWithAI: strategy === 'AIExtractionStrategy',
         strategy,
         enableScreenshot: screenshotEnabled,
         deepScroll: deepScrollEnabled,
@@ -1483,22 +1547,22 @@ export default function App() {
       setProgress(50);
 
       if (strategy === 'LLMExtractionStrategy') {
-        addLog('error', 'Advanced Extraction is dormant. Switch to Groq (Llama-3) for active synthesis.');
+        addLog('error', 'Advanced Extraction is dormant. Switch to AI Credits (DeepSeek/Qwen) for active synthesis.');
         setProgress(0);
         setIsScraping(false);
         return;
-      } else if (strategy === 'GroqExtractionStrategy') {
-        addLog('skill', 'Applying Groq (Llama-3) Extraction...');
+      } else if (strategy === 'AIExtractionStrategy') {
+        addLog('skill', 'Applying AI Credits (DeepSeek/Qwen) Extraction...');
         setProgress(80);
-        setExtractionResult(`# ${data.title}\n\n${data.groqResult}` || "Groq extraction failed or returned no data.");
+        setExtractionResult(`# ${data.title}\n\n${data.aiResult}` || "AI extraction failed or returned no data.");
         
         if (data.secondary) {
-            setExtractionResult2(`# ${data.secondary.title}\n\n${data.secondary.groqResult}` || "Secondary extraction failed.");
+            setExtractionResult2(`# ${data.secondary.title}\n\n${data.secondary.aiResult}` || "Secondary extraction failed.");
         } else {
             setExtractionResult2(null);
         }
 
-        addLog('success', 'Groq Extraction completed successfully.');
+        addLog('success', 'AI Credits Extraction completed successfully.');
       } else {
         addLog('skill', `Using Raw Data Strategy (${strategy})`);
         await new Promise(r => setTimeout(r, 800));
@@ -1595,7 +1659,7 @@ export default function App() {
              body: JSON.stringify({ 
                url: linkUrl, 
                selector, 
-               extractWithGroq: strategy === 'GroqExtractionStrategy', 
+               extractWithAI: strategy === 'AIExtractionStrategy',
                strategy,
                enableScreenshot: screenshotEnabled 
              })
@@ -1615,7 +1679,7 @@ export default function App() {
               addLog('error', 'Advanced Strategy inactive.');
               pageReport = "ADVANCED_INACTIVE";
            } else {
-              pageReport = data.groqResult || data.text;
+              pageReport = data.aiResult || data.text;
            }
            
            addLog('success', `[${globalIndex + 1}/${selectedLinks.length}] Harvested: ${data.title || 'Page'}`);
@@ -1715,20 +1779,101 @@ export default function App() {
     }
   };
 
+  const getLogLabel = (type: LogEntry['type']) => {
+    switch (type) {
+      case 'system': return 'SYS';
+      case 'debug': return 'DBG';
+      case 'success': return 'OK';
+      case 'action': return 'ACT';
+      case 'network': return 'NET';
+      case 'wait': return 'WAIT';
+      case 'skill': return 'AI';
+      case 'error': return 'ERR';
+      default: return 'LOG';
+    }
+  };
+
+  const moduleNavItems: AppShellNavItem<ModuleId>[] = [
+    { id: 'scrapper', label: 'Data Harvest', description: 'Scrape and capture', icon: Cpu },
+    { id: 'sku-indexer', label: 'SKU Indexer', description: 'Master catalogue', icon: Database },
+    { id: 'jobs', label: 'AI Jobs', description: 'Mapping queue', icon: Briefcase },
+    { id: 'images', label: 'Image Sourcer', description: 'Extract assets', icon: ImageIcon },
+    { id: 'settings', label: 'Settings', description: 'System controls', icon: Settings },
+  ];
+
+  const moduleMeta: Record<ModuleId, { title: string; subtitle: string }> = {
+    scrapper: { title: 'Data Harvest', subtitle: 'Capture product content, discovery targets, and markdown harvest files.' },
+    'sku-indexer': { title: 'SKU Indexer', subtitle: 'Manage the master product catalogue used by jobs and exports.' },
+    jobs: { title: 'AI Mapping Jobs', subtitle: 'Dispatch mapping jobs and review generated catalogue outputs.' },
+    images: { title: 'Image Sourcer', subtitle: 'Extract, inspect, and prepare product image assets.' },
+    settings: { title: 'Settings', subtitle: 'Configure connectivity, mapping logic, and schema governance.' },
+  };
+
+  const scraperModeTabs = [
+    { id: 'single', label: 'Single' },
+    { id: 'batch', label: 'Batch' },
+    { id: 'deep', label: 'Deep' },
+  ] as const;
+
+  const firestoreTitle = isFirestoreStatusLoading
+    ? 'Checking Firestore...'
+    : firestoreHealth
+      ? `Mode: ${firestoreHealth.mode} | Project: ${firestoreHealth.projectId || 'n/a'} | DB: ${firestoreHealth.databaseId || '(default)'} | Auth: ${firestoreHealth.authSource || 'n/a'}${firestoreHealth.initError ? ` | Error: ${firestoreHealth.initError}` : ''}`
+      : 'Firestore health unavailable';
+
+  const scraperBlockedReason =
+    mode === 'single' && !url.trim()
+      ? 'Target URL is required before harvest can run.'
+      : mode === 'batch' && batchData.length === 0
+        ? 'Upload an XLSX manifest before running batch harvest.'
+        : mode === 'deep' && selectedLinks.length === 0
+          ? 'Run PLP discovery and select at least one target first.'
+          : null;
+
+  const scraperActionLabel = isScraping
+    ? mode === 'batch' ? 'Processing Batch...' : 'Extracting...'
+    : mode === 'batch' ? 'Run Batch Harvest' : mode === 'deep' ? 'Extract Selected Targets' : 'Run Harvest';
+
+  const shellStatusItems = (
+    <>
+      <Badge tone={isScraping ? 'blue' : 'green'}>
+        <span className={`h-2 w-2 rounded-full ${isScraping ? 'bg-blue-400 animate-pulse' : 'bg-emerald-400 status-pulse'}`} />
+        {isScraping ? 'Engine Busy' : 'Engine Active'}
+      </Badge>
+      <Badge
+        tone={isFirestoreStatusLoading ? 'neutral' : firestoreHealth?.connected ? 'green' : 'red'}
+        title={firestoreTitle}
+      >
+        <span
+          className={[
+            'h-2 w-2 rounded-full',
+            isFirestoreStatusLoading ? 'bg-white/40 animate-pulse' : firestoreHealth?.connected ? 'bg-emerald-400 status-pulse' : 'bg-red-400',
+          ].join(' ')}
+        />
+        {isFirestoreStatusLoading ? 'Firebase Checking' : firestoreHealth?.connected ? 'Firebase Live' : 'Firebase Fallback'}
+      </Badge>
+      <Badge tone="neutral">Chromium 124</Badge>
+    </>
+  );
+
   return (
     <ErrorBoundary>
       {isAuthChecking ? (
-        <div className="h-screen bg-brand-bg flex items-center justify-center text-white/70 font-mono uppercase tracking-widest text-xs">
-          Restoring session...
+        <div className="h-screen bg-brand-bg flex items-center justify-center">
+          <LoadingState label="Restoring session..." />
         </div>
       ) : !authUser ? (
         <div className="h-screen bg-brand-bg flex items-center justify-center p-6">
-          <div className="w-full max-w-md bg-black/40 border border-white/10 rounded-3xl p-8 shadow-2xl">
+          <Card className="w-full max-w-md" padded>
             <div className="space-y-2 mb-6">
+              <div className="h-10 w-16 rounded-lg border border-white/10 bg-black overflow-hidden">
+                <img src="/logoq.png" alt="paxth logo" className="h-full w-full object-contain" />
+              </div>
               <h1 className="text-2xl font-black tracking-tight text-white">Paxth Automation Solution</h1>
+              <p className="text-sm text-white/45">Sign in with an approved email and internal access code.</p>
             </div>
             <div className="space-y-4">
-              <input
+              <Input
                 type="email"
                 value={loginEmail}
                 onChange={(e) => setLoginEmail(e.target.value)}
@@ -1736,158 +1881,63 @@ export default function App() {
                   if (e.key === 'Enter' && !isLoggingIn) submitLogin();
                 }}
                 placeholder="name@company.com"
-                className="w-full bg-black/60 border border-white/10 rounded-2xl px-4 py-3 text-sm text-white focus:outline-none focus:border-blue-500"
+                label="Email"
               />
-              <button
+              <Input
+                type="password"
+                value={loginAccessCode}
+                onChange={(e) => setLoginAccessCode(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !isLoggingIn) submitLogin();
+                }}
+                placeholder="Access code"
+                autoComplete="current-password"
+                label="Access code"
+              />
+              <Button
                 onClick={submitLogin}
-                disabled={isLoggingIn || !loginEmail.trim()}
-                className="w-full py-3 rounded-2xl bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 disabled:text-white/50 text-white text-[11px] font-bold uppercase tracking-widest transition-colors"
+                disabled={isLoggingIn || !loginEmail.trim() || !loginAccessCode.trim()}
+                className="w-full"
+                size="lg"
               >
                 {isLoggingIn ? 'Signing In...' : 'Sign In'}
-              </button>
+              </Button>
             </div>
-          </div>
+          </Card>
         </div>
       ) : (
-      <div className="flex flex-col h-screen overflow-hidden bg-brand-bg font-sans selection:bg-blue-500/30">
-        {/* TOP NAVIGATION BAR */}
-      <nav id="top-nav" className="h-14 border-b border-white/10 flex items-center justify-between px-6 bg-black/40 z-10 backdrop-blur-sm">
-        <div className="flex items-center gap-3">
-          <div
-            className="h-9 w-14 rounded flex items-center justify-center bg-black border border-white/10 shadow-lg shadow-white/5 overflow-hidden"
-          >
-            <img src="/logoq.png" alt="paxth logo" className="h-full w-full object-contain" />
-          </div>
-          <h1 className="text-lg font-medium tracking-tight">paxth v22.30</h1>
-        </div>
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${isScraping ? 'bg-blue-500 animate-pulse' : 'bg-green-500 status-pulse'} shadow-[0_0_8px_rgba(34,197,94,0.5)]`}></div>
-            <span className={`text-[10px] ${isScraping ? 'text-blue-500' : 'text-green-500'} font-mono tracking-wider uppercase`}>
-              {isScraping ? 'Engine Busy' : 'Engine Active'}
-            </span>
-          </div>
-          <div
-            className={`flex items-center gap-2 px-2.5 py-1 rounded border ${
-              isFirestoreStatusLoading
-                ? 'border-white/15 text-white/50'
-                : firestoreHealth?.connected
-                  ? 'border-emerald-500/30 text-emerald-400'
-                  : 'border-red-500/30 text-red-400'
-            }`}
-            title={
-              isFirestoreStatusLoading
-                ? 'Checking Firestore...'
-                : firestoreHealth
-                  ? `Mode: ${firestoreHealth.mode} | Project: ${firestoreHealth.projectId || 'n/a'} | DB: ${firestoreHealth.databaseId || '(default)'} | Auth: ${firestoreHealth.authSource || 'n/a'}${firestoreHealth.initError ? ` | Error: ${firestoreHealth.initError}` : ''}`
-                  : 'Firestore health unavailable'
-            }
-          >
-            <div
-              className={`w-2 h-2 rounded-full ${
-                isFirestoreStatusLoading
-                  ? 'bg-white/40 animate-pulse'
-                  : firestoreHealth?.connected
-                    ? 'bg-emerald-400 status-pulse'
-                    : 'bg-red-400'
-              }`}
-            ></div>
-            <span className="text-[10px] font-mono tracking-wider uppercase">
-              {isFirestoreStatusLoading
-                ? 'Firebase: Checking'
-                : firestoreHealth?.connected
-                  ? 'Firebase: Live'
-                  : 'Firebase: Fallback'}
-            </span>
-          </div>
-          <div className="h-6 w-px bg-white/10"></div>
-          <div className="text-[10px] text-white/50 font-mono uppercase tracking-widest hidden sm:block">
-            Playwright: Chromium-124
-          </div>
-        </div>
-      </nav>
-
-      <main className="flex-1 flex min-h-0 overflow-hidden">
-        {/* LEFT PANEL: MAIN MODULES NAVIGATION */}
-        <aside id="main-nav" className="w-20 border-r border-white/10 flex flex-col bg-black/40 shrink-0 items-center py-6 gap-8">
-          <button 
-            onClick={() => setCurrentModule('sku-indexer')}
-            className={`p-3 rounded-xl transition-all group relative ${currentModule === 'sku-indexer' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/40' : 'text-white/30 hover:bg-white/5'}`}
-            title="SKU Indexer"
-          >
-            <Database className="w-6 h-6" />
-            <div className="absolute left-full ml-4 px-2 py-1 bg-zinc-900 border border-white/10 rounded text-[10px] font-bold text-white opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">SKU Indexer</div>
-          </button>
-          <button 
-            onClick={() => setCurrentModule('scrapper')}
-            className={`p-3 rounded-xl transition-all group relative ${currentModule === 'scrapper' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/40' : 'text-white/30 hover:bg-white/5'}`}
-            title="E-commerce Scrapper"
-          >
-            <Cpu className="w-6 h-6" />
-            <div className="absolute left-full ml-4 px-2 py-1 bg-zinc-900 border border-white/10 rounded text-[10px] font-bold text-white opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">Data Harvest</div>
-          </button>
-          <button 
-            onClick={() => setCurrentModule('jobs')}
-            className={`p-3 rounded-xl transition-all group relative ${currentModule === 'jobs' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/40' : 'text-white/30 hover:bg-white/5'}`}
-            title="AI Mapping Jobs"
-          >
-            <Briefcase className="w-6 h-6" />
-            <div className="absolute left-full ml-4 px-2 py-1 bg-zinc-900 border border-white/10 rounded text-[10px] font-bold text-white opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">AI Jobs</div>
-          </button>
-          <button 
-            onClick={() => setCurrentModule('images')}
-            className={`p-3 rounded-xl transition-all group relative ${currentModule === 'images' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/40' : 'text-white/30 hover:bg-white/5'}`}
-            title="Image Sourcer"
-          >
-            <ImageIcon className="w-6 h-6" />
-            <div className="absolute left-full ml-4 px-2 py-1 bg-zinc-900 border border-white/10 rounded text-[10px] font-bold text-white opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">Image Sourcer</div>
-          </button>
-          <button 
-            onClick={() => setCurrentModule('settings')}
-            className={`p-3 rounded-xl transition-all group relative ${currentModule === 'settings' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/40' : 'text-white/30 hover:bg-white/5'}`}
-            title="General Settings"
-          >
-            <Settings className="w-6 h-6" />
-            <div className="absolute left-full ml-4 px-2 py-1 bg-zinc-900 border border-white/10 rounded text-[10px] font-bold text-white opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity whitespace-nowrap z-50">Configuration</div>
-          </button>
-        </aside>
+      <AppShell<ModuleId>
+        productName="paxth"
+        versionLabel="v22.30"
+        logoSrc="/logoq.png"
+        navItems={moduleNavItems}
+        activeNavId={currentModule}
+        onNavChange={setCurrentModule}
+        title={moduleMeta[currentModule].title}
+        subtitle={moduleMeta[currentModule].subtitle}
+        statusItems={shellStatusItems}
+        userEmail={authUser.email}
+        userRole={authUser.role}
+        onLogout={logout}
+      >
+      <main className="flex flex-1 min-h-0 overflow-hidden max-lg:flex-col">
 
         {/* SECONDARY PANEL: CONFIGURATION */}
-        <aside id="config-panel" className="w-80 border-r border-white/10 flex flex-col bg-black/20 shrink-0">
+        <aside id="config-panel" className="w-80 border-r border-white/10 flex flex-col bg-zinc-950/55 shrink-0 max-lg:w-full max-lg:max-h-[44vh] max-lg:border-r-0 max-lg:border-b">
           {currentModule === 'scrapper' && (
             <>
               {/* MODE SELECTOR */}
-              <div id="mode-selector" className="p-3 border-b border-white/10 flex gap-2">
-                <button 
-                  id="mode-btn-single"
-                  onClick={() => {
-                    setMode('single');
-                    setDiscoveryMode(false);
+              <div id="mode-selector" className="border-b border-white/10 p-3">
+                <Tabs
+                  items={[...scraperModeTabs]}
+                  value={mode}
+                  onChange={(nextMode) => {
+                    setMode(nextMode);
+                    setDiscoveryMode(nextMode === 'deep');
                   }}
-                  className={`flex-1 py-1.5 px-3 rounded-lg text-[9px] font-bold uppercase tracking-widest transition-all ${mode === 'single' ? 'bg-blue-600 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)]' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
-                >
-                  Single
-                </button>
-                <button 
-                  id="mode-btn-batch"
-                  onClick={() => {
-                    setMode('batch');
-                    setDiscoveryMode(false);
-                  }}
-                  className={`flex-1 py-1.5 px-3 rounded-lg text-[9px] font-bold uppercase tracking-widest transition-all ${mode === 'batch' ? 'bg-blue-600 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)]' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
-                >
-                  Batch
-                </button>
-                <button 
-                  id="mode-btn-deep"
-                  onClick={() => {
-                    setMode('deep');
-                    setDiscoveryMode(true);
-                  }}
-                  className={`flex-1 py-1.5 px-3 rounded-lg text-[9px] font-bold uppercase tracking-widest transition-all ${mode === 'deep' ? 'bg-blue-600 text-white shadow-[0_0_15px_rgba(37,99,235,0.4)]' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
-                >
-                  Deep
-                </button>
+                  ariaLabel="Harvest mode"
+                  className="grid w-full grid-cols-3"
+                />
               </div>
 
           <div className="flex-1 overflow-y-auto p-6 custom-scrollbar flex flex-col gap-6">
@@ -1899,33 +1949,36 @@ export default function App() {
                   </label>
                   <div className="space-y-4">
                     <div>
-                      <div className="text-[10px] text-white/60 mb-2 font-medium uppercase tracking-wider">Target SKU Index</div>
-                      <select 
-                        value={harvestSku}
+                      <Select 
+                        label="Target SKU Index"
+                        value={skuIndex.some((s) => (s.sku || s.SKU) === harvestSku) ? harvestSku : ''}
                         onChange={(e) => setHarvestSku(e.target.value)}
                         disabled={isScraping}
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs font-mono text-green-400 focus:outline-none focus:border-green-500 transition-colors uppercase"
+                        className="font-mono text-xs text-green-400 uppercase"
+                        helpText="Choose an indexed SKU, or enter a manual SKU when no index match exists."
                       >
                         <option value="">Select SKU from Index</option>
                         {skuIndex.map((s, i) => (
                            <option key={i} value={s.sku || s.SKU}>{s.sku || s.SKU}</option>
                         ))}
-                      </select>
-                      {!harvestSku && (
-                        <input 
-                          type="text"
-                          value={harvestSku}
-                          onChange={(e) => setHarvestSku(e.target.value)}
-                          disabled={isScraping}
-                          placeholder="Or enter manual SKU..."
-                          className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs font-mono text-green-400 focus:outline-none focus:border-green-500 transition-colors placeholder:text-white/20 mt-2"
-                        />
-                      )}
+                      </Select>
+                      <Input
+                        type="text"
+                        value={harvestSku}
+                        onChange={(e) => setHarvestSku(e.target.value)}
+                        disabled={isScraping}
+                        placeholder="Or enter manual SKU..."
+                        className="font-mono text-xs text-green-400 uppercase"
+                        wrapperClassName="mt-2"
+                        aria-label="Manual SKU"
+                      />
                     </div>
                     <div>
                       <div className="flex justify-between items-center mb-2">
                         <div className="text-[10px] text-white/60 font-medium uppercase tracking-wider">Target URL</div>
                         <button 
+                          type="button"
+                          aria-label="Analyze target URL with AI"
                           onClick={handleSmartAnalyze}
                           disabled={isAnalyzing || isScraping || !url}
                           className="text-[10px] text-blue-400 hover:text-blue-300 font-bold flex items-center gap-1 transition-all disabled:opacity-30"
@@ -1934,12 +1987,15 @@ export default function App() {
                           AI ANALYZE
                         </button>
                       </div>
-                      <input 
+                      <Input
                         type="text"
                         value={url}
                         onChange={(e) => setUrl(e.target.value)}
                         disabled={isScraping}
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs font-mono text-blue-400 focus:outline-none focus:border-blue-500 transition-colors"
+                        placeholder="https://example.com/product"
+                        className="font-mono text-xs text-blue-400"
+                        aria-label="Target URL"
+                        error={!url.trim() ? 'Required to start a product scrape.' : undefined}
                       />
                     </div>
                     <div>
@@ -1954,13 +2010,15 @@ export default function App() {
                           </button>
                         )}
                       </div>
-                      <input 
+                      <Input
                         type="text"
                         value={selector}
                         onChange={(e) => setSelector(e.target.value)}
                         placeholder="e.g. .specs-table"
                         disabled={isScraping}
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs font-mono text-blue-400 focus:outline-none focus:border-blue-500 transition-colors placeholder:text-white/20"
+                        className="font-mono text-xs text-blue-400"
+                        aria-label="Specific selector"
+                        helpText="Optional: limit extraction to a known product details container."
                       />
                     </div>
                     <div>
@@ -1978,17 +2036,17 @@ export default function App() {
                     </div>
                     <div>
                       <div className="text-[10px] text-white/60 mb-2 font-medium uppercase tracking-wider">AI Strategy</div>
-                      <select 
+                      <Select 
                         value={strategy}
                         onChange={(e) => setStrategy(e.target.value)}
                         disabled={isScraping}
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs focus:outline-none focus:border-blue-500 transition-all cursor-pointer"
+                        className="text-xs"
                       >
                         <option value="LLMExtractionStrategy">Advanced AI (Dormant)</option>
-                        <option value="GroqExtractionStrategy">Llama-3 (Fast Batch)</option>
+                        <option value="AIExtractionStrategy">DeepSeek/Qwen (Fast Batch)</option>
                         <option value="JsonLdExtractionStrategy">JSON-LD Meta</option>
                         <option value="WholeCaptureStrategy">Whole Capture</option>
-                      </select>
+                      </Select>
                     </div>
                     <div className="grid grid-cols-2 gap-3">
                       <div className="flex items-center justify-between p-3 bg-white/5 rounded-lg border border-white/5">
@@ -1996,8 +2054,12 @@ export default function App() {
                           <span className="text-[10px] text-white/80 font-bold uppercase tracking-wider tracking-tighter">Screenshots</span>
                         </div>
                         <button 
+                          type="button"
+                          role="switch"
+                          aria-checked={screenshotEnabled}
+                          aria-label="Toggle screenshots"
                           onClick={() => setScreenshotEnabled(!screenshotEnabled)}
-                          className={`w-8 h-4 rounded-full transition-all relative ${screenshotEnabled ? 'bg-blue-600' : 'bg-white/10'}`}
+                          className={`w-8 h-4 rounded-full transition-all relative focus:outline-none focus:ring-2 focus:ring-blue-500/50 ${screenshotEnabled ? 'bg-blue-600' : 'bg-white/10'}`}
                         >
                           <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${screenshotEnabled ? 'left-4.5' : 'left-0.5'}`} />
                         </button>
@@ -2007,8 +2069,12 @@ export default function App() {
                           <span className="text-[10px] text-white/80 font-bold uppercase tracking-wider tracking-tighter">Deep Scroll</span>
                         </div>
                         <button 
+                          type="button"
+                          role="switch"
+                          aria-checked={deepScrollEnabled}
+                          aria-label="Toggle deep scroll"
                           onClick={() => setDeepScrollEnabled(!deepScrollEnabled)}
-                          className={`w-8 h-4 rounded-full transition-all relative ${deepScrollEnabled ? 'bg-blue-600' : 'bg-white/10'}`}
+                          className={`w-8 h-4 rounded-full transition-all relative focus:outline-none focus:ring-2 focus:ring-blue-500/50 ${deepScrollEnabled ? 'bg-blue-600' : 'bg-white/10'}`}
                         >
                           <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-all ${deepScrollEnabled ? 'left-4.5' : 'left-0.5'}`} />
                         </button>
@@ -2018,17 +2084,21 @@ export default function App() {
                 </div>
 
                 {!hasSecondaryTarget ? (
-                  <button
+                  <Button
                     onClick={() => setHasSecondaryTarget(true)}
-                    className="w-full border border-dashed border-white/20 rounded py-2 text-[10px] uppercase tracking-widest text-white/40 hover:text-white/80 hover:border-white/40 transition-colors"
+                    variant="secondary"
+                    className="w-full border-dashed"
                   >
-                    + Add Secondary Target
-                  </button>
+                    <Plus className="h-3.5 w-3.5" />
+                    Add Secondary Target
+                  </Button>
                 ) : (
                   <div className="space-y-4 pt-4 border-t border-white/10 relative mt-4">
                     <button 
+                      type="button"
+                      aria-label="Remove secondary target"
                       onClick={() => { setHasSecondaryTarget(false); setUrl2(''); setSelector2(''); }}
-                      className="absolute top-4 right-0 p-1 text-white/30 hover:text-red-400 transition-colors"
+                      className="absolute top-4 right-0 p-1 text-white/30 hover:text-red-400 transition-colors focus:outline-none focus:ring-2 focus:ring-red-500/40 rounded"
                     >
                       <X className="w-4 h-4" />
                     </button>
@@ -2037,22 +2107,27 @@ export default function App() {
                     </label>
                     <div>
                       <div className="text-[10px] text-white/60 mb-2 font-medium uppercase tracking-wider">Target URL 2</div>
-                      <input 
+                      <Input
                         type="text"
                         value={url2}
                         onChange={(e) => setUrl2(e.target.value)}
                         disabled={isScraping}
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs font-mono text-blue-400 focus:outline-none focus:border-blue-500 transition-colors"
+                        placeholder="https://example.com/product-context"
+                        className="font-mono text-xs text-blue-400"
+                        aria-label="Secondary target URL"
+                        helpText="Optional: capture a second source for comparison or supporting context."
                       />
                     </div>
                     <div>
                       <div className="text-[10px] text-white/60 mb-2 font-medium uppercase tracking-wider">Specific Selector 2</div>
-                      <input 
+                      <Input
                         type="text"
                         value={selector2}
                         onChange={(e) => setSelector2(e.target.value)}
                         disabled={isScraping}
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs font-mono text-blue-400 focus:outline-none focus:border-blue-500 transition-colors placeholder:text-white/20"
+                        placeholder="e.g. .specs-table"
+                        className="font-mono text-xs text-blue-400"
+                        aria-label="Secondary selector"
                       />
                     </div>
                     <div>
@@ -2069,18 +2144,18 @@ export default function App() {
                       />
                     </div>
                     <div>
-                      <div className="text-[10px] text-white/60 mb-2 font-medium uppercase tracking-wider">AI Strategy 2</div>
-                      <select 
+                      <Select
+                        label="AI Strategy 2"
                         value={strategy2}
                         onChange={(e) => setStrategy2(e.target.value)}
                         disabled={isScraping}
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs focus:outline-none focus:border-blue-500 transition-all cursor-pointer"
+                        className="text-xs"
                       >
                         <option value="LLMExtractionStrategy">Advanced AI (Dormant)</option>
-                        <option value="GroqExtractionStrategy">Llama-3 (Fast Batch)</option>
+                        <option value="AIExtractionStrategy">DeepSeek/Qwen (Fast Batch)</option>
                         <option value="JsonLdExtractionStrategy">JSON-LD Meta</option>
                         <option value="WholeCaptureStrategy">Whole Capture</option>
-                      </select>
+                      </Select>
                     </div>
                   </div>
                 )}
@@ -2117,13 +2192,14 @@ export default function App() {
                       className="p-4 bg-blue-600/10 border border-blue-500/30 rounded-xl space-y-3"
                     >
                       <div className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Site Preset Name</div>
-                      <input 
+                      <Input
                         type="text"
                         autoFocus
                         value={tempSelectorName}
                         onChange={(e) => setTempSelectorName(e.target.value)}
                         placeholder="e.g. Amazon Product View"
-                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500"
+                        className="text-xs"
+                        aria-label="Site preset name"
                       />
                       <div className="flex gap-2">
                         <button 
@@ -2165,7 +2241,8 @@ export default function App() {
                       <input 
                         type="file" 
                         onChange={handleBatchUpload}
-                        accept=".xlsx, .xls"
+                        accept=".xlsx"
+                        aria-label="Upload batch manifest XLSX"
                         className="absolute inset-0 opacity-0 cursor-pointer"
                       />
                       <div className="p-3 bg-blue-500/10 rounded-full text-blue-400 group-hover:scale-110 transition-transform">
@@ -2177,12 +2254,14 @@ export default function App() {
                       </div>
                     </div>
 
-                    <button
+                    <Button
                       onClick={handleDownloadBatchTemplate}
-                      className="w-full py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 hover:text-white/80 rounded text-[9px] font-bold uppercase tracking-widest transition-all"
+                      variant="secondary"
+                      size="sm"
+                      className="w-full"
                     >
                       ↓ Download Batch Template
-                    </button>
+                    </Button>
 
                     {batchData.length > 0 && (
                       <div className="p-3 bg-green-500/10 border border-green-500/20 rounded-lg flex items-center justify-between">
@@ -2211,12 +2290,13 @@ export default function App() {
                           </button>
                         )}
                       </div>
-                      <input 
+                      <Input
                         type="text"
                         value={selector}
                         onChange={(e) => setSelector(e.target.value)}
                         placeholder="e.g. .specs-table"
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs font-mono text-blue-400 focus:outline-none focus:border-blue-500 transition-colors"
+                        className="font-mono text-xs text-blue-400"
+                        aria-label="Batch selector"
                       />
                     </div>
 
@@ -2235,23 +2315,24 @@ export default function App() {
 
                     <div>
                       <div className="text-[10px] text-white/60 mb-2 font-medium uppercase tracking-wider">AI Strategy</div>
-                      <select 
+                      <Select 
                         value={strategy}
                         onChange={(e) => setStrategy(e.target.value)}
                         disabled={isScraping}
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs focus:outline-none focus:border-blue-500 transition-all cursor-pointer"
+                        className="text-xs"
                       >
                         <option value="LLMExtractionStrategy">Advanced AI (Dormant)</option>
-                        <option value="GroqExtractionStrategy">Llama-3 (Fast Batch)</option>
-                        <option value="JsonLdExtractionStrategy">JSON-LD Meta</option>
+                        <option value="AIExtractionStrategy">DeepSeek/Qwen (Fast Batch)</option>
+                        <option value="JsonLdExtractionStrategy">JSON-Ld Meta</option>
                         <option value="WholeCaptureStrategy">Whole Capture</option>
-                      </select>
+                      </Select>
                     </div>
 
-                    <button 
+                    <Button 
                       onClick={handleBatchScrape}
                       disabled={isScraping || batchData.length === 0}
-                      className={`w-full py-4 rounded-xl font-bold uppercase tracking-widest text-xs flex items-center justify-center gap-3 transition-all ${isScraping || batchData.length === 0 ? 'bg-white/5 text-white/20 cursor-not-allowed' : 'bg-green-600 hover:bg-green-500 text-white shadow-xl shadow-green-600/20 active:scale-[0.98]'}`}
+                      className="w-full"
+                      size="lg"
                     >
                       {isScraping ? (
                         <>
@@ -2259,7 +2340,7 @@ export default function App() {
                           Processing Batch...
                         </>
                       ) : 'Run Batch Harvest'}
-                    </button>
+                    </Button>
 
                     <div className="pt-6 border-t border-white/5 space-y-4">
                       <div className="flex items-center justify-between">
@@ -2298,13 +2379,14 @@ export default function App() {
                       className="p-4 bg-green-600/10 border border-green-500/30 rounded-xl space-y-3"
                     >
                       <div className="text-[10px] font-bold text-green-400 uppercase tracking-widest">Site Preset Name</div>
-                      <input 
+                      <Input
                         type="text"
                         autoFocus
                         value={tempSelectorName}
                         onChange={(e) => setTempSelectorName(e.target.value)}
                         placeholder="e.g. Bulk Products Profile"
-                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-xs text-white focus:outline-none focus:border-green-500"
+                        className="text-xs"
+                        aria-label="Batch preset name"
                       />
                       <div className="flex gap-2">
                         <button 
@@ -2333,12 +2415,14 @@ export default function App() {
                   <div className="space-y-4">
                     <div>
                       <div className="text-[10px] text-white/60 mb-2 font-medium uppercase tracking-wider">PLP (Listing) URL</div>
-                      <input 
+                      <Input
                         type="text"
                         value={url}
                         onChange={(e) => setUrl(e.target.value)}
                         placeholder="e.g. samsung.com/in/smartphones"
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs font-mono text-blue-400 focus:outline-none focus:border-blue-500 transition-colors"
+                        className="font-mono text-xs text-blue-400"
+                        aria-label="PLP listing URL"
+                        error={!url.trim() ? 'A listing URL is required before discovery can run.' : undefined}
                       />
                     </div>
                     <div>
@@ -2353,12 +2437,14 @@ export default function App() {
                           </button>
                         )}
                       </div>
-                      <input 
+                      <Input
                         type="text"
                         value={plpSelector}
                         onChange={(e) => setPlpSelector(e.target.value)}
                         placeholder="e.g. .product-item a"
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs font-mono text-blue-400 focus:outline-none focus:border-blue-500 transition-colors placeholder:text-white/20"
+                        className="font-mono text-xs text-blue-400"
+                        aria-label="PLP selectors"
+                        helpText="Optional selector for product cards or links on the listing page."
                       />
                     </div>
                     <div>
@@ -2373,6 +2459,14 @@ export default function App() {
                         isPlp={true}
                       />
                     </div>
+                    <Button
+                      onClick={handleDiscover}
+                      disabled={isDiscovering || isScraping || !url.trim()}
+                      className="w-full"
+                    >
+                      {isDiscovering ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                      {isDiscovering ? 'Discovering Targets...' : 'Run PLP Discovery'}
+                    </Button>
                   </div>
                 </div>
 
@@ -2386,13 +2480,14 @@ export default function App() {
                       className="p-4 bg-blue-600/10 border border-blue-500/30 rounded-xl space-y-3"
                     >
                       <div className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">PLP Preset Name</div>
-                      <input 
+                      <Input
                         type="text"
                         autoFocus
                         value={tempPlpSelectorName}
                         onChange={(e) => setTempPlpSelectorName(e.target.value)}
                         placeholder="e.g. My Category List"
-                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500"
+                        className="text-xs"
+                        aria-label="PLP preset name"
                       />
                       <div className="flex gap-2">
                         <button 
@@ -2429,12 +2524,14 @@ export default function App() {
                           </button>
                         )}
                       </div>
-                      <input 
+                      <Input
                         type="text"
                         value={selector}
                         onChange={(e) => setSelector(e.target.value)}
                         placeholder="e.g. .specs-table"
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs font-mono text-blue-400 focus:outline-none focus:border-blue-500 transition-colors placeholder:text-white/20"
+                        className="font-mono text-xs text-blue-400"
+                        aria-label="Deep scrape selector"
+                        helpText="Optional: applied to each discovered target page."
                       />
                     </div>
                     <div>
@@ -2451,17 +2548,17 @@ export default function App() {
                     </div>
                     <div>
                       <div className="text-[10px] text-white/60 mb-2 font-medium uppercase tracking-wider">AI Strategy</div>
-                      <select 
+                      <Select 
                         value={strategy}
                         onChange={(e) => setStrategy(e.target.value)}
                         disabled={isScraping}
-                        className="w-full bg-white/5 border border-white/10 rounded px-3 py-2 text-xs focus:outline-none focus:border-blue-500 transition-all cursor-pointer"
+                        className="text-xs"
                       >
                         <option value="LLMExtractionStrategy">Advanced AI (Dormant)</option>
-                        <option value="GroqExtractionStrategy">Llama-3 (Fast Batch)</option>
+                        <option value="AIExtractionStrategy">DeepSeek/Qwen (Fast Batch)</option>
                         <option value="JsonLdExtractionStrategy">JSON-LD Meta</option>
                         <option value="WholeCaptureStrategy">Whole Capture</option>
-                      </select>
+                      </Select>
                     </div>
                     <div className="flex items-center justify-between p-3 bg-white/5 rounded-lg border border-white/5">
                       <div className="flex flex-col">
@@ -2469,8 +2566,12 @@ export default function App() {
                         <span className="text-[9px] text-white/30 italic">Capture screenshots</span>
                       </div>
                       <button 
+                        type="button"
+                        role="switch"
+                        aria-checked={screenshotEnabled}
+                        aria-label="Toggle visual context screenshots"
                         onClick={() => setScreenshotEnabled(!screenshotEnabled)}
-                        className={`w-10 h-5 rounded-full transition-all relative ${screenshotEnabled ? 'bg-blue-600' : 'bg-white/10'}`}
+                        className={`w-10 h-5 rounded-full transition-all relative focus:outline-none focus:ring-2 focus:ring-blue-500/50 ${screenshotEnabled ? 'bg-blue-600' : 'bg-white/10'}`}
                       >
                         <div className={`absolute top-1 w-3 h-3 rounded-full bg-white transition-all ${screenshotEnabled ? 'left-6' : 'left-1'}`} />
                       </button>
@@ -2489,13 +2590,14 @@ export default function App() {
                       className="p-4 bg-blue-600/10 border border-blue-500/30 rounded-xl space-y-3 mt-4"
                     >
                       <div className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Site Preset Name</div>
-                      <input 
+                      <Input
                         type="text"
                         autoFocus
                         value={tempSelectorName}
                         onChange={(e) => setTempSelectorName(e.target.value)}
                         placeholder="e.g. Tech Specs Profile"
-                        className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-xs text-white focus:outline-none focus:border-blue-500"
+                        className="text-xs"
+                        aria-label="Deep scrape preset name"
                       />
                       <div className="flex gap-2">
                         <button 
@@ -2526,39 +2628,37 @@ export default function App() {
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <label className="text-[10px] uppercase tracking-widest text-white/40 font-bold block">Master Indexer</label>
-                <div className="flex bg-white/5 p-1 rounded-lg border border-white/10">
-                  <button 
-                    onClick={() => setIndexerMode('upload')}
-                    className={`px-3 py-1 text-[9px] font-bold uppercase transition-all rounded ${indexerMode === 'upload' ? 'bg-blue-600 text-white shadow-lg' : 'text-white/40 hover:text-white'}`}
-                  >
-                    Bulk Upload
-                  </button>
-                  <button 
-                    onClick={() => setIndexerMode('manual')}
-                    className={`px-3 py-1 text-[9px] font-bold uppercase transition-all rounded ${indexerMode === 'manual' ? 'bg-blue-600 text-white shadow-lg' : 'text-white/40 hover:text-white'}`}
-                  >
-                    Manual Entry
-                  </button>
-                </div>
+                <Tabs
+                  items={[
+                    { id: 'upload', label: 'Bulk Upload' },
+                    { id: 'manual', label: 'Manual Entry' },
+                  ]}
+                  value={indexerMode}
+                  onChange={(value) => setIndexerMode(value as 'upload' | 'manual')}
+                  ariaLabel="SKU indexer mode"
+                />
               </div>
 
               {indexerMode === 'upload' ? (
                 <div className="space-y-2">
-                  <div className="p-4 border-2 border-dashed border-white/10 rounded-xl flex flex-col items-center gap-3 text-center cursor-pointer relative group">
-                    <input type="file" onChange={handleSkuUpload} accept=".xlsx, .xls" className="absolute inset-0 opacity-0 cursor-pointer" />
+                  <div className="upload-zone group">
+                    <input type="file" onChange={handleSkuUpload} accept=".xlsx" aria-label="Upload SKU master index XLSX" className="absolute inset-0 opacity-0 cursor-pointer" />
                     <Database className="w-6 h-6 text-blue-400 group-hover:scale-110 transition-transform" />
                     <div className="text-[10px] font-bold text-white/80 uppercase">UPLOAD Master Index (.xlsx)</div>
+                    <div className="text-[10px] text-white/35">Expected columns match the downloadable template.</div>
                   </div>
-                  <button
+                  <Button
                     onClick={handleDownloadSkuTemplate}
-                    className="w-full py-1.5 bg-white/5 hover:bg-white/10 border border-white/10 text-white/50 hover:text-white/80 rounded text-[9px] font-bold uppercase tracking-widest transition-all"
+                    variant="secondary"
+                    size="sm"
+                    className="w-full"
                   >
                     ↓ Download Template
-                  </button>
+                  </Button>
                 </div>
               ) : (
                 <div className="space-y-3 bg-white/5 p-4 rounded-xl border border-white/10">
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="space-y-1">
                       <label className="text-[9px] uppercase text-white/40 font-bold">SKU *</label>
                       <input 
@@ -2579,7 +2679,7 @@ export default function App() {
                       />
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="space-y-1">
                       <label className="text-[9px] uppercase text-white/40 font-bold">Brand</label>
                       <input 
@@ -2599,7 +2699,7 @@ export default function App() {
                       />
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="space-y-1">
                       <label className="text-[9px] uppercase text-white/40 font-bold">Weight (kg)</label>
                       <input 
@@ -2619,7 +2719,7 @@ export default function App() {
                       />
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="space-y-1">
                       <label className="text-[9px] uppercase text-white/40 font-bold">Attr Set</label>
                       <select 
@@ -2634,21 +2734,25 @@ export default function App() {
                       </select>
                     </div>
                   </div>
-                  <div className="space-y-1">
-                    <label className="text-[9px] uppercase text-white/40 font-bold">SAP Data (Context)</label>
-                    <textarea 
+                  <Textarea
+                      label="SAP Data (Context)"
                       value={manualSkuData.sap_data || ''}
                       onChange={(e) => setManualSkuData({...manualSkuData, sap_data: e.target.value})}
                       placeholder="Paste SAP context data..."
-                      className="w-full bg-black/40 border border-white/10 rounded px-2 py-2 text-[10px] text-white/80 focus:border-blue-500/50 outline-none h-16 resize-none custom-scrollbar"
+                      className="h-20 resize-none text-[10px] custom-scrollbar"
+                      helpText="Optional supporting data used by mapping jobs."
                     />
-                  </div>
-                  <button 
+                  {!manualSkuData.sku?.trim() && (
+                    <Alert tone="warning" className="text-[11px]">
+                      SKU is required before this record can be saved.
+                    </Alert>
+                  )}
+                  <Button 
                     onClick={handleManualSkuSubmit}
-                    className="w-full py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-[9px] font-bold uppercase tracking-widest transition-all mt-2"
+                    className="w-full mt-2"
                   >
                     Save SKU to Index
-                  </button>
+                  </Button>
                 </div>
               )}
 
@@ -2672,6 +2776,7 @@ export default function App() {
                      <input
                        type="checkbox"
                        className="w-3 h-3 cursor-pointer accent-red-500"
+                       aria-label="Select all SKU index records"
                        checked={selectedSkuIndexItems.length === skuIndex.length}
                        onChange={(e) => {
                          if (e.target.checked) setSelectedSkuIndexItems(skuIndex.map((s: any) => (s.sku || s.SKU)?.toString() ?? ''));
@@ -2681,7 +2786,7 @@ export default function App() {
                      <span className="text-[8px] uppercase text-white/20 tracking-widest">Select All</span>
                    </div>
                  )}
-                 <input type="file" className="hidden" ref={pdfInputRef} accept="application/pdf" onChange={handlePdfFileChange} />
+                 <input type="file" className="hidden" ref={pdfInputRef} accept="application/pdf" aria-label="Attach PDF context to SKU" onChange={handlePdfFileChange} />
                  {skuIndex.map((s: any, i: number) => {
                    const skuValue = s.sku || s.SKU;
                    const hasPdf = !!s.pdf_text;
@@ -2692,6 +2797,7 @@ export default function App() {
                           <input
                             type="checkbox"
                             className="w-3 h-3 cursor-pointer accent-red-500 flex-shrink-0"
+                            aria-label={`Select SKU ${skuValue}`}
                             checked={isChecked}
                             onChange={(e) => {
                               const v = skuValue?.toString() ?? '';
@@ -2715,12 +2821,14 @@ export default function App() {
                              onClick={() => handlePdfTrigger(skuValue.toString())}
                              className="w-5 h-5 flex items-center justify-center rounded bg-cyan-500/10 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-cyan-500 hover:text-white"
                              title="Attach PDF as Context 1"
+                             aria-label={`Attach PDF to SKU ${skuValue}`}
                            >
                              <FileText className="w-3.5 h-3.5" />
                            </button>
                            <button 
                              onClick={() => handleSkuDelete(skuValue.toString())}
                              className="w-5 h-5 flex items-center justify-center rounded bg-red-500/10 text-red-500 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500 hover:text-white"
+                             aria-label={`Delete SKU ${skuValue}`}
                            >
                              <X className="w-3.5 h-3.5" />
                            </button>
@@ -2752,41 +2860,33 @@ export default function App() {
 
           <div id="cta-area" className="p-6 border-t border-white/5 bg-black/30">
             {currentModule === 'scrapper' ? (
-              <button 
-                onClick={mode === 'single' ? handleScrape : (mode === 'batch' ? handleBatchScrape : handleDeepScrape)}
-                disabled={isScraping || (mode === 'single' && !url) || (mode === 'batch' && batchData.length === 0)}
-                className="w-full bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-800 disabled:text-white/20 text-white py-4 rounded-xl font-bold transition-all flex items-center justify-center gap-3 group shadow-xl active:scale-95"
-              >
-                {isScraping ? <Loader2 className="w-5 h-5 animate-spin" /> : <Zap className="w-5 h-5" />}
-                {isScraping ? 'EXTRACTING...' : (mode === 'batch' ? 'RUN BATCH PULSE' : 'RUN HARVEST')}
-              </button>
+              <div className="space-y-3">
+                {scraperBlockedReason && !isScraping ? (
+                  <Alert tone="warning" className="text-[11px] leading-relaxed">
+                    {scraperBlockedReason}
+                  </Alert>
+                ) : null}
+                <Button 
+                  onClick={mode === 'single' ? handleScrape : (mode === 'batch' ? handleBatchScrape : handleDeepScrape)}
+                  disabled={isScraping || (mode === 'single' && !url) || (mode === 'batch' && batchData.length === 0) || (mode === 'deep' && selectedLinks.length === 0)}
+                  className="w-full"
+                  size="lg"
+                >
+                  {isScraping ? <Loader2 className="w-5 h-5 animate-spin" /> : <Zap className="w-5 h-5" />}
+                  {scraperActionLabel}
+                </Button>
+              </div>
             ) : (
-               <div className="p-4 border border-dashed border-white/5 rounded-xl text-center text-[10px] text-white/20 font-bold uppercase tracking-widest">Global Status Ready</div>
+               <Alert tone="info" className="text-center text-[10px] font-bold uppercase tracking-widest">Global Status Ready</Alert>
             )}
           </div>
         </aside>
         {/* CENTER PANEL: INTERACTIVE HUB */}
         <section id="main-content" className="flex-1 flex flex-col bg-black/5 min-h-0 relative">
           <div className="flex-1 p-6 overflow-y-auto custom-scrollbar flex flex-col gap-6 min-h-0">
-            <div className="flex items-center justify-between bg-black/30 border border-white/10 rounded-xl px-4 py-3">
-              <div className="min-w-0">
-                <p className="text-[10px] uppercase tracking-widest text-white/40">Signed In</p>
-                <p className="text-sm text-white truncate">
-                  {authUser.email} <span className="text-white/40">({authUser.role})</span>
-                </p>
-              </div>
-              <button
-                onClick={logout}
-                className="ml-4 px-4 py-2 rounded-lg bg-white/5 hover:bg-red-600 border border-white/15 hover:border-red-500 text-[10px] font-bold uppercase tracking-widest text-white/80 hover:text-white transition-colors"
-                title="End current session and sign in as another user"
-              >
-                Logout & Switch User
-              </button>
-            </div>
-             
              {/* MODULE VIEW CONDITIONAL */}
              {currentModule === 'settings' ? (
-                <div className="flex-1 flex flex-col p-8 max-w-7xl mx-auto w-full">
+                <div className="flex-1 flex flex-col p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full">
                    <motion.div 
                      initial={{ opacity: 0, y: 10 }}
                      animate={{ opacity: 1, y: 0 }}
@@ -2798,7 +2898,7 @@ export default function App() {
                            <Settings className="w-4 h-4 animate-spin-slow" />
                            <span className="text-[10px] font-bold uppercase tracking-[0.3em]">System Core</span>
                          </div>
-                         <h2 className="text-5xl font-black tracking-tighter text-white">Logic Governance</h2>
+                         <h2 className="text-3xl sm:text-4xl lg:text-5xl font-black tracking-tight text-white">Logic Governance</h2>
                          <p className="text-[11px] text-white/30 uppercase tracking-[0.2em] font-medium max-w-md leading-relaxed">
                            Orchestrate AI synthesis parameters and attribute indexing schemas.
                          </p>
@@ -2848,7 +2948,7 @@ export default function App() {
                                            <Key className="w-7 h-7 text-blue-400" />
                                          </div>
                                          <div>
-                                           <h3 className="text-xl font-bold text-white leading-none">Groq Infrastructure</h3>
+                                           <h3 className="text-xl font-bold text-white leading-none">AI Credits Infrastructure</h3>
                                            <p className="text-[10px] text-white/30 uppercase tracking-widest mt-2">Authentication & Gateway</p>
                                          </div>
                                        </div>
@@ -2857,22 +2957,22 @@ export default function App() {
                                             <Cpu className="w-32 h-32" />
                                           </div>
                                           <p className="text-sm text-white/50 leading-relaxed max-w-md mb-10">
-                                             Define your production Groq API key for high-speed Llama-3 synthesis. 
+                                             Define your production AI Credits API key for high-speed DeepSeek/Qwen synthesis. 
                                              Failure to provide a key will trigger an automatic fallback to internal environment defaults.
                                           </p>
                                           <div className="space-y-4">
                                              <div className="flex items-center justify-between">
                                                <label className="text-[9px] text-white/40 font-bold uppercase tracking-widest">Secret Vault / Master Key</label>
-                                               <span className="text-[9px] text-blue-400/50 font-mono">Llama-3.3-70B-Versatile</span>
+                                               <span className="text-[9px] text-blue-400/50 font-mono">DeepSeek-V4-Flash</span>
                                              </div>
                                              <div className="flex flex-col gap-3">
                                                 <div className="flex gap-4">
                                                    <div className="relative flex-1">
                                                      <input 
                                                        type="password" 
-                                                       value={appSettings.groqApiKey}
-                                                       onChange={(e) => setAppSettings({...appSettings, groqApiKey: e.target.value})}
-                                                       placeholder="gsk_internal_production_gateway..."
+                                                       value={appSettings.aiCreditsApiKey}
+                                                       onChange={(e) => setAppSettings({...appSettings, aiCreditsApiKey: e.target.value})}
+                                                       placeholder="aicredits_production_key..."
                                                        className="w-full bg-black/60 border border-white/10 rounded-2xl px-6 py-5 text-sm font-mono text-blue-400 focus:outline-none focus:border-blue-500/50 focus:ring-8 focus:ring-blue-500/5 transition-all shadow-inner"
                                                      />
                                                    </div>
@@ -2885,7 +2985,7 @@ export default function App() {
                                                    </button>
                                                    <button 
                                                      onClick={() => {
-                                                       const updatedSettings = {...appSettings, groqApiKey: ''};
+                                                       const updatedSettings = {...appSettings, aiCreditsApiKey: ''};
                                                        setAppSettings(updatedSettings);
                                                        if (isAdmin) {
                                                          persistSettings(updatedSettings);
@@ -2898,8 +2998,8 @@ export default function App() {
                                                 </div>
                                                 <p className="text-[10px] text-white/35 leading-relaxed">
                                                   {isAdmin
-                                                    ? 'Use SAVE KEY to persist the Groq credential. WIPE clears the stored key immediately.'
-                                                    : 'Admin role required to persist or wipe the Groq credential.'}
+                                                    ? 'Use SAVE KEY to persist the AI Credits credential. WIPE clears the stored key immediately.'
+                                                    : 'Admin role required to persist or wipe the AI Credits credential.'}
                                                 </p>
                                              </div>
                                           </div>
@@ -3310,35 +3410,55 @@ export default function App() {
                 </div>
               ) : currentModule === 'scrapper' ? (
                <>
-                 <div className={`h-[350px] rounded-xl border border-white/10 bg-[#0a0a0a] flex flex-col shadow-inner overflow-hidden shrink-0 transition-all ${isScraping ? 'ring-1 ring-blue-500/20' : ''}`}>
-                    <div className="h-9 border-b border-white/10 flex items-center px-4 justify-between bg-white/[0.02]">
-                       <div className="flex items-center gap-2"><Terminal className="w-3 h-3 text-white/30" /><span className="text-[10px] font-mono text-white/30 uppercase tracking-widest italic">Live Engine Terminal</span></div>
-                       <button onClick={() => setLogs([])} className="text-[9px] text-white/20 hover:text-white font-bold tracking-tighter uppercase">[X_CLEAR]</button>
+                 <Card padded={false} className={`h-[350px] terminal-card flex flex-col overflow-hidden shrink-0 transition-all ${isScraping ? 'ring-1 ring-blue-500/20' : ''}`}>
+                    <div className="min-h-10 border-b border-white/10 flex flex-wrap items-center px-4 py-2 justify-between gap-2 bg-white/[0.02]">
+                       <div className="flex items-center gap-2"><Terminal className="w-3 h-3 text-blue-300" /><span className="text-[10px] font-mono text-white/65 uppercase tracking-widest">Live Progress</span></div>
+                       <div className="flex items-center gap-2">
+                         <Badge tone={isScraping ? 'blue' : 'neutral'}>{isScraping ? `${progress}%` : 'Idle'}</Badge>
+                         <Badge tone="neutral">{logs.length} events</Badge>
+                         <Button variant="ghost" size="sm" onClick={() => setLogs([])} disabled={logs.length === 0} className="h-7 px-2 text-[9px]">Clear</Button>
+                       </div>
                     </div>
-                    <div className="flex-1 p-4 font-mono text-[10px] leading-relaxed overflow-y-auto text-white/80 custom-scrollbar">
-                      {logs.map((log, i) => (
-                        <div key={i} className={`${getLogColor(log.type)} flex gap-2 mb-0.5`}>
-                          <span className="text-white/10 shrink-0">{log.timestamp}</span>
-                          <span>{log.message}</span>
+                    <div className="px-4 pt-3">
+                      <Progress value={isScraping ? progress : 0} />
+                    </div>
+                    <div className="flex-1 p-3 font-mono text-[10px] leading-relaxed overflow-y-auto text-white/80 custom-scrollbar" aria-live="polite" aria-label="Live job logs">
+                      {logs.length === 0 ? (
+                        <div className="flex h-full min-h-28 items-center justify-center rounded-lg border border-dashed border-white/10 text-center text-white/35">
+                          <div>
+                            <Terminal className="mx-auto mb-2 h-5 w-5 text-white/25" />
+                            <p className="text-[10px] font-bold uppercase tracking-widest">No log events yet</p>
+                            <p className="mt-1 text-[10px] text-white/28">Run a harvest, discovery, mapping, or image job to stream activity here.</p>
+                          </div>
+                        </div>
+                      ) : logs.map((log, i) => (
+                        <div key={`${log.timestamp}-${i}`} className={`${getLogColor(log.type)} log-row`}>
+                          <span className="text-white/22 shrink-0">{log.timestamp}</span>
+                          <span className="log-type-pill">{getLogLabel(log.type)}</span>
+                          <span className="min-w-0 break-words text-white/78">{log.message}</span>
                         </div>
                       ))}
                       <div ref={logsEndRef} />
                     </div>
-                 </div>
+                 </Card>
 
                  <div className="flex-1 flex flex-col min-h-0">
                     {discoveryMode && discoveredLinks.length > 0 && (
-                      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 rounded-xl border border-blue-500/20 bg-blue-500/5 flex flex-col overflow-hidden max-h-64">
-                         <div className="h-10 border-b border-blue-500/20 px-4 flex items-center justify-between">
-                            <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest uppercase">Target Discovery: {discoveredLinks.length} Items Found</span>
-                            <div className="flex gap-4">
-                               <button onClick={() => setSelectedLinks(discoveredLinks.map(l => l.href))} className="text-[10px] text-blue-400 hover:text-blue-300 font-bold uppercase transition-colors">Select All</button>
-                               <button onClick={handleDeepScrape} disabled={selectedLinks.length === 0 || isScraping} className="bg-blue-600 px-3 py-1 rounded text-[10px] font-bold text-white transition-all disabled:opacity-50">EXTRACT SELECTED ({selectedLinks.length})</button>
+                      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 rounded-xl border border-blue-500/20 bg-blue-500/5 flex flex-col overflow-hidden max-h-72">
+                         <div className="min-h-12 border-b border-blue-500/20 px-4 py-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                            <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Target Discovery: {discoveredLinks.length} items found</span>
+                            <div className="responsive-actions">
+                               <Badge tone={selectedLinks.length > 0 ? 'blue' : 'neutral'}>{selectedLinks.length} selected</Badge>
+                               <Button onClick={() => setSelectedLinks(discoveredLinks.map(l => l.href))} variant="ghost" size="sm">Select All</Button>
+                               <Button onClick={handleDeepScrape} disabled={selectedLinks.length === 0 || isScraping} size="sm">
+                                 {isScraping ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Zap className="h-3.5 w-3.5" />}
+                                 Extract Selected
+                               </Button>
                             </div>
                          </div>
                          <div className="flex-1 overflow-y-auto p-2 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-1 custom-scrollbar">
                             {discoveredLinks.map((link, idx) => (
-                              <button key={idx} onClick={() => setSelectedLinks(prev => prev.includes(link.href) ? prev.filter(h => h !== link.href) : [...prev, link.href])} className={`flex items-center justify-between p-2 rounded border transition-all text-left ${selectedLinks.includes(link.href) ? 'bg-blue-600/20 border-blue-500/40' : 'bg-black/20 border-white/5 hover:border-white/10'}`}>
+                              <button key={idx} type="button" aria-pressed={selectedLinks.includes(link.href)} onClick={() => setSelectedLinks(prev => prev.includes(link.href) ? prev.filter(h => h !== link.href) : [...prev, link.href])} className={`flex items-center justify-between p-2 rounded border transition-all text-left focus:outline-none focus:ring-2 focus:ring-blue-500/40 ${selectedLinks.includes(link.href) ? 'bg-blue-600/20 border-blue-500/40' : 'bg-black/20 border-white/5 hover:border-white/10'}`}>
                                 <div className="truncate flex-1 pr-2">
                                   <div className="text-[10px] font-medium text-white truncate">{link.text || 'Target Product'}</div>
                                   <div className="text-[8px] text-white/30 truncate font-mono">{link.href}</div>
@@ -3434,7 +3554,7 @@ export default function App() {
                                 </summary>
                                 <div className="p-6 overflow-y-auto max-h-[500px] custom-scrollbar space-y-4">
                                   {isEditingEntry && harvestSaveError && (
-                                    <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs text-red-200">{harvestSaveError}</div>
+                                    <Alert tone="danger">{harvestSaveError}</Alert>
                                   )}
                                   {isEditingEntry ? (
                                     <textarea
@@ -3490,45 +3610,46 @@ export default function App() {
                           )}
                         </div>
                       ) : (
-                        <div className="flex-1 flex flex-col items-center justify-center border border-dashed border-white/5 rounded-xl opacity-20">
-                          <Activity className="w-12 h-12 mb-4 border border-white/20 p-5 rounded-full" />
-                          <div className="text-[10px] font-bold uppercase tracking-[0.4em]">
-                            {extractionResult === '' ? 'Harvest Complete: No Data Extracted' : 'Engine Awaiting Initialization'}
-                          </div>
-                        </div>
+                        <EmptyState
+                          icon={<Activity className="h-8 w-8" />}
+                          title={extractionResult === '' ? 'Harvest complete: no data extracted' : 'Engine awaiting initialization'}
+                          description="Run a product scrape, PLP discovery, or batch harvest to populate this workspace."
+                          className="flex-1"
+                        />
                       )
                     )}
                  </div>
                </>
              ) : currentModule === 'jobs' ? (
                <div className="flex-1 flex flex-col gap-6">
-                  <div className="flex justify-between items-end">
+                  <div className="responsive-toolbar">
                     <div>
                       <h2 className="text-2xl font-bold tracking-tight">AI Mapping Dispatch</h2>
                       <p className="text-[11px] text-white/40 uppercase tracking-widest mt-1">Bind SKU Master with Collected Markdown Assets</p>
                     </div>
-                    <div className="flex gap-3">
-                        <button onClick={() => fetchJobs()} className="px-5 py-2.5 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-bold transition-all flex items-center gap-2 border border-white/10"><Activity className="w-3.5 h-3.5" /> RE-SYNC</button>
+                    <div className="responsive-actions">
+                        <Button onClick={() => fetchJobs()} variant="secondary" size="md"><Activity className="w-3.5 h-3.5" /> RE-SYNC</Button>
                         {selectedJobs.length > 0 && (
-                          <button
+                          <Button
                             onClick={() => handleBulkSkuDelete(selectedJobs, 'jobs')}
-                            className="px-5 py-2.5 bg-red-600 hover:bg-red-500 rounded-lg text-xs font-bold text-white shadow-lg shadow-red-900/20 transition-all flex items-center gap-2"
+                            variant="danger"
+                            size="md"
                           >
                             <X className="w-3.5 h-3.5" /> DELETE ({selectedJobs.length})
-                          </button>
+                          </Button>
                         )}
-                        <button onClick={() => {
+                        <Button onClick={() => {
                           const query = selectedJobs.length > 0 ? `?skus=${selectedJobs.join(',')}` : '';
                           window.open(`/api/outputs/xlsx${query}`)
-                        }} className="px-6 py-2.5 bg-green-600 hover:bg-green-500 rounded-lg text-xs font-bold text-white shadow-lg shadow-green-900/20 transition-all flex items-center gap-2">
+                        }} className="bg-green-600 hover:bg-green-500" size="md">
                            EXPORT MASTER XLS {selectedJobs.length > 0 ? `(${selectedJobs.length})` : ''}
-                        </button>
+                        </Button>
                     </div>
                   </div>
 
                   {/* Search bar */}
-                  <div className="flex items-center gap-3">
-                    <input
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                    <Input
                       type="text"
                       value={jobsSearch}
                       onChange={(e) => {
@@ -3536,7 +3657,9 @@ export default function App() {
                         fetchJobs({ search: e.target.value });
                       }}
                       placeholder="Search by SKU or title…"
-                      className="flex-1 px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-xs placeholder-white/30 focus:outline-none focus:border-white/20"
+                      label="Search jobs"
+                      wrapperClassName="flex-1"
+                      className="text-xs"
                     />
                     {jobsTotal !== undefined && (
                       <span className="text-[11px] text-white/30 whitespace-nowrap">
@@ -3545,12 +3668,13 @@ export default function App() {
                     )}
                   </div>
 
-                  <div className="flex-1 rounded-xl border border-white/10 bg-[#0a0a0a]/80 overflow-hidden flex flex-col shadow-2xl">
-                      <div className="grid grid-cols-[1fr_8fr_8fr_6fr_5fr_4fr_4fr] h-12 border-b border-white/10 bg-white/5 items-center px-6 text-[10px] font-bold uppercase tracking-widest text-white/40">
+                      <div className="data-table-shell flex flex-1 flex-col">
+                      <div className="data-table-header grid h-12 grid-cols-[1fr_8fr_8fr_6fr_5fr_4fr_4fr] items-center px-6">
                          <div className="flex items-center">
                            <input 
                              type="checkbox" 
                              className="w-3 h-3 cursor-pointer outline-none accent-blue-500"
+                             aria-label="Select all visible jobs"
                              checked={jobs.length > 0 && selectedJobs.length === jobs.length}
                              onChange={(e) => {
                                 if (e.target.checked) {
@@ -3570,11 +3694,12 @@ export default function App() {
                       </div>
                       <div className="flex-1 overflow-y-auto custom-scrollbar">
                          {jobs.map((job, idx) => (
-                            <div key={idx} className="grid grid-cols-[1fr_8fr_8fr_6fr_5fr_4fr_4fr] h-14 border-b border-white/[0.03] hover:bg-white/[0.02] items-center px-6 transition-colors">
+                            <div key={idx} className="data-table-row grid min-h-14 grid-cols-[1fr_8fr_8fr_6fr_5fr_4fr_4fr] items-center px-6">
                                <div className="flex items-center">
                                  <input 
                                    type="checkbox" 
                                    className="w-3 h-3 cursor-pointer outline-none accent-blue-500"
+                                   aria-label={`Select job ${job.sku}`}
                                    checked={selectedJobs.includes(job.sku)}
                                    onChange={(e) => {
                                       if(e.target.checked) setSelectedJobs(p => [...p, job.sku]);
@@ -3588,11 +3713,12 @@ export default function App() {
                                <div className="flex flex-col justify-center gap-1 text-[10px] font-mono">
                                  {job.harvestFile && (
                                    <div className="flex items-center gap-2">
-                                     <div className="text-green-500 flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full bg-green-500"></div> HARVEST_READY</div>
+                                     <Badge tone="green" className="rounded-md">HARVEST_READY</Badge>
                                      <button
                                        onClick={() => openHarvestFile(job.harvestFile!, 'job harvest')}
                                        className="w-4 h-4 bg-white/5 hover:bg-white/10 text-blue-400 rounded flex items-center justify-center transition-all"
                                        title="Open Harvest File"
+                                       aria-label={`Open harvest file for ${job.sku}`}
                                      >
                                        <Eye className="w-3 h-3" />
                                      </button>
@@ -3600,6 +3726,7 @@ export default function App() {
                                        onClick={() => handleHarvestDelete(job.harvestFile!)}
                                        className="w-4 h-4 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded flex items-center justify-center transition-all"
                                        title="Delete Harvest File"
+                                       aria-label={`Delete harvest file for ${job.sku}`}
                                      >
                                        <X className="w-3 h-3" />
                                      </button>
@@ -3607,25 +3734,28 @@ export default function App() {
                                  )}
                                  {job.hasPdf && (
                                    <div className="flex items-center gap-2">
-                                     <div className="text-purple-400 flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full bg-purple-400"></div> PDF_ARCHIVED</div>
-                                     <button onClick={() => handleViewPdf(job.sku)} className="w-4 h-4 bg-white/5 hover:bg-white/10 text-blue-400 rounded flex items-center justify-center transition-all" title="View PDF Extracted Text"><FileText className="w-3 h-3" /></button>
+                                     <Badge tone="blue" className="rounded-md">PDF_ARCHIVED</Badge>
+                                     <button onClick={() => handleViewPdf(job.sku)} className="w-4 h-4 bg-white/5 hover:bg-white/10 text-blue-400 rounded flex items-center justify-center transition-all" title="View PDF Extracted Text" aria-label={`View PDF text for ${job.sku}`}><FileText className="w-3 h-3" /></button>
                                    </div>
                                  )}
                                {job.hasSapData && (
                                  <div className="flex items-center gap-2">
-                                   <div className="text-yellow-400 flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full bg-yellow-400"></div> SAP_DATA</div>
+                                   <Badge tone="amber" className="rounded-md">SAP_DATA</Badge>
                                  </div>
                                )}
-                               {!job.harvestFile && !job.hasPdf && !job.hasSapData && <div className="text-white/20">NO_DATA_LINK</div>}
+                               {!job.harvestFile && !job.hasPdf && !job.hasSapData && <Badge tone="neutral" className="rounded-md">NO_DATA_LINK</Badge>}
                               </div>
                               <div className="flex items-center gap-2">
-                                 <div className={`w-2 h-2 rounded-full ${job.status === 'completed' ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : (job.status === 'ready' ? 'bg-blue-500 animate-pulse' : 'bg-white/10')}`}></div>
-                                 <span className={`text-[10px] font-bold uppercase tracking-tighter ${job.status === 'completed' ? 'text-green-500' : (job.status === 'ready' ? 'text-blue-500' : 'text-white/20')}`}>{job.status}</span>
+                                 <Badge tone={job.status === 'completed' ? 'green' : job.status === 'ready' ? 'blue' : 'neutral'} className="rounded-md">
+                                   <span className={`h-1.5 w-1.5 rounded-full ${job.status === 'completed' ? 'bg-emerald-400' : job.status === 'ready' ? 'bg-blue-400 animate-pulse' : 'bg-white/30'}`} />
+                                   {job.status}
+                                 </Badge>
                                  {job.status === 'completed' && (
                                    <button 
                                      onClick={() => handleOutputDelete(job.sku)}
                                      className="w-4 h-4 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded flex items-center justify-center transition-all ml-1"
                                      title="Delete Output JSON"
+                                     aria-label={`Delete output for ${job.sku}`}
                                    >
                                       <X className="w-3 h-3" />
                                    </button>
@@ -3637,31 +3767,52 @@ export default function App() {
                                      onClick={() => fetchOutput(job.sku)}
                                      className="p-2 rounded bg-white/5 hover:bg-white/10 transition-all text-blue-400 hover:text-blue-300"
                                      title="View/Edit Output"
+                                     aria-label={`View or edit output for ${job.sku}`}
                                    >
                                      <Eye className="w-4 h-4"/>
                                    </button>
                                  ) : 
                                   (job.status === 'ready' && (
-                                     <div className="flex items-center justify-end gap-2">
+                                     <div className="flex flex-wrap items-center justify-end gap-2">
                                        <select 
-                                         value={jobAiModels[job.sku] || 'llama-3.3-70b-versatile'}
+                                         value={jobAiModels[job.sku] || DEFAULT_MAP_AI_MODELS[0]}
                                          onChange={(e) => setJobAiModels({...jobAiModels, [job.sku]: e.target.value})}
+                                         aria-label={`AI model for ${job.sku}`}
                                          className="px-2 py-1 bg-white/5 border border-white/10 rounded text-[9px] font-bold uppercase text-white/50 focus:outline-none focus:border-white/20 transition-all cursor-pointer h-[26px]"
                                        >
-                                         <option value="llama-3.3-70b-versatile">Llama 3.3 70B</option>
-                                         <option value="llama-3.1-8b-instant">Llama 3.1 8B</option>
-                                         <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
-                                         <option value="gemma2-9b-it">Gemma 2 9B</option>
+                                         {DEFAULT_MAP_AI_MODELS.map((model) => (
+                                           <option key={model} value={model}>{model}</option>
+                                         ))}
+                                         <option value={CUSTOM_MAP_AI_MODEL_VALUE}>Custom model...</option>
                                        </select>
-                                       <button onClick={async () => {
-                                          addLog('skill', `AI Dispatching mapping for SKU ${job.sku}...`);
+                                       {(jobAiModels[job.sku] || DEFAULT_MAP_AI_MODELS[0]) === CUSTOM_MAP_AI_MODEL_VALUE && (
+                                         <input
+                                           type="text"
+                                           value={customJobAiModels[job.sku] || ''}
+                                           onChange={(e) => setCustomJobAiModels({...customJobAiModels, [job.sku]: e.target.value})}
+                                           placeholder="provider/model-id"
+                                           aria-label={`Custom AI model for ${job.sku}`}
+                                           className="h-[26px] w-44 rounded border border-white/10 bg-white/5 px-2 py-1 text-[9px] font-mono text-white/70 outline-none transition-all placeholder:text-white/25 focus:border-white/20"
+                                         />
+                                       )}
+                                       <button aria-label={`Run AI mapping for ${job.sku}`} onClick={async () => {
                                           try {
+                                            const selectedMapAiModel = jobAiModels[job.sku] || DEFAULT_MAP_AI_MODELS[0];
+                                            const model = selectedMapAiModel === CUSTOM_MAP_AI_MODEL_VALUE
+                                              ? (customJobAiModels[job.sku] || '').trim()
+                                              : selectedMapAiModel;
+
+                                            if (!model) {
+                                              throw new Error(MAP_AI_MISSING_MODEL_MESSAGE);
+                                            }
+
+                                            addLog('skill', `AI Dispatching mapping for SKU ${job.sku} using ${model}...`);
                                             const startRes = await apiFetch('/api/jobs/run', {
                                               method: 'POST',
                                               headers: {'Content-Type': 'application/json'},
                                               body: JSON.stringify({ 
                                                  sku: job.sku, 
-                                                 aiModel: jobAiModels[job.sku] || 'llama-3.3-70b-versatile'
+                                                 aiModel: model
                                                })
                                             });
                                             if (!startRes.ok) {
@@ -3681,23 +3832,31 @@ export default function App() {
                               </div>
                            </div>
                         ))}
-                        {jobs.length === 0 && <div className="flex-1 flex items-center justify-center text-[10px] text-white/20 uppercase font-bold tracking-[0.2em] py-20 italic">Awaiting SKU Master Upload</div>}
+                        {jobs.length === 0 && (
+                          <EmptyState
+                            icon={<Briefcase className="h-8 w-8" />}
+                            title="Awaiting SKU master upload"
+                            description="Upload or create SKU records first, then jobs will appear here for enrichment and export."
+                            className="m-6"
+                          />
+                        )}
                      </div>
                      {jobsHasMore && (
                        <div className="flex justify-center py-3 border-t border-white/5">
-                         <button
+                         <Button
                            onClick={() => fetchJobs({ cursor: jobsNextCursor ?? undefined, append: true })}
-                           className="px-6 py-2 bg-white/5 hover:bg-white/10 rounded-lg text-xs font-bold border border-white/10 transition-all"
+                           variant="secondary"
+                           size="sm"
                          >
                            LOAD MORE
-                         </button>
+                         </Button>
                        </div>
                      )}
                   </div>
                </div>
              ) : currentModule === 'sku-indexer' ? (
                <div className="flex-1 flex flex-col gap-6">
-                  <div className="flex justify-between items-end">
+                  <div className="responsive-toolbar">
                     <div>
                       <h2 className="text-2xl font-bold tracking-tight">SKU Master Pulse</h2>
                       <p className="text-[11px] text-white/40 uppercase tracking-widest mt-1">Currently governing {skuIndex.length} product records in local memory</p>
@@ -3716,7 +3875,14 @@ export default function App() {
                            </div>
                         </div>
                      ))}
-                     {skuIndex.length === 0 && <div className="col-span-full border border-dashed border-white/10 rounded-2xl py-24 flex flex-col items-center justify-center opacity-20 italic font-bold uppercase tracking-[0.3em] text-xs">Awaiting Master Index Pulse</div>}
+                     {skuIndex.length === 0 && (
+                       <EmptyState
+                         icon={<Database className="h-8 w-8" />}
+                         title="Awaiting master index"
+                         description="Upload an XLSX master index or add a SKU manually to start building the catalogue."
+                         className="col-span-full"
+                       />
+                     )}
                   </div>
                </div>
              ) : currentModule === 'images' ? (
@@ -3728,35 +3894,33 @@ export default function App() {
                     </div>
                   </div>
 
-                  <div className="p-6 rounded-3xl border border-white/10 bg-black/40 space-y-6">
-                    <div className="grid grid-cols-[1fr_2fr_auto] gap-4 items-end">
-                      <div className="space-y-1">
-                        <label className="text-[10px] uppercase font-bold text-white/40 tracking-widest">SKU ID</label>
-                        <input
+                  <Card className="space-y-6">
+                    <div className="grid grid-cols-1 gap-4 items-end lg:grid-cols-[1fr_2fr_auto]">
+                        <Input
                           type="text"
                           value={imageSku}
                           onChange={(e) => setImageSku(e.target.value)}
                           placeholder="e.g. LAP-100"
-                          className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-blue-400 font-mono focus:border-blue-500/50 outline-none"
+                          className="font-mono text-blue-400"
+                          label="SKU ID"
+                          error={!imageSku.trim() ? 'Required before sourcing an image.' : undefined}
                         />
-                      </div>
-                      <div className="space-y-1">
-                        <label className="text-[10px] uppercase font-bold text-white/40 tracking-widest">Target URL</label>
-                        <input
+                        <Input
                           type="text"
                           value={imageUrl}
                           onChange={(e) => setImageUrl(e.target.value)}
                           placeholder="https://"
-                          className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm text-white/80 font-mono focus:border-blue-500/50 outline-none"
+                          className="font-mono"
+                          label="Target URL"
+                          error={!imageUrl.trim() ? 'Required before image extraction.' : undefined}
                         />
-                      </div>
-                      <button
+                      <Button
                         onClick={handleImageExtract}
                         disabled={isExtractingImage || !imageUrl || !imageSku}
-                        className={`h-[46px] px-8 rounded-xl font-bold uppercase tracking-widest text-[11px] transition-all flex items-center justify-center gap-2 ${isExtractingImage ? 'bg-cyan-600/50 text-white/50 cursor-not-allowed' : 'bg-cyan-600 hover:bg-cyan-500 text-white shadow-lg active:scale-95'}`}
+                        className="h-[46px] bg-cyan-600 hover:bg-cyan-500"
                       >
                         {isExtractingImage ? <><Loader2 className="w-4 h-4 animate-spin" /> Extracting</> : <><ImageIcon className="w-4 h-4" /> Source Image</>}
-                      </button>
+                      </Button>
                     </div>
                     <div className="flex items-center gap-2">
                        <input 
@@ -3770,9 +3934,9 @@ export default function App() {
                          Enable Full Page Screenshot (Debug)
                        </label>
                     </div>
-                  </div>
+                  </Card>
 
-                  <div className="rounded-3xl border border-emerald-500/20 bg-emerald-500/5 p-5 space-y-4">
+                  <div className="dashboard-card space-y-4 p-5">
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                       <div>
                         <h3 className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">Load from Harvest File</h3>
@@ -3791,9 +3955,11 @@ export default function App() {
                       </div>
                     )}
                     {harvestFiles.length === 0 ? (
-                      <div className="border border-dashed border-white/10 rounded-2xl py-10 flex items-center justify-center opacity-30 italic font-bold uppercase tracking-[0.3em] text-[10px]">
-                        No harvest files available
-                      </div>
+                      <EmptyState
+                        icon={<Archive className="h-7 w-7" />}
+                        title="No harvest files available"
+                        description="Run a scrape or batch harvest first, then load image URLs from the saved harvest files."
+                      />
                     ) : (
                       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                         {harvestFiles.map((file: any, idx: number) => {
@@ -3826,31 +3992,33 @@ export default function App() {
                         <span className="px-3 py-1 rounded-full border border-white/10 bg-black/40 text-[10px] font-bold text-white/60 uppercase tracking-widest">
                           {selectedImageUrls.length}/10 selected
                         </span>
-                        <button
+                        <Button
                           onClick={() => setSelectedImageUrls([])}
                           disabled={selectedImageUrls.length === 0}
-                          className="px-4 py-2 rounded-xl border border-white/10 text-[10px] uppercase tracking-widest font-bold text-white/60 hover:text-white hover:border-white/20 transition-colors disabled:opacity-40"
+                          variant="secondary"
+                          size="sm"
                         >
                           Clear Selection
-                        </button>
-                        <button
+                        </Button>
+                        <Button
                           onClick={exportSelectedImages}
                           disabled={selectedImageUrls.length === 0 || isExportingImages}
-                          className="px-5 py-2 rounded-xl bg-cyan-600 hover:bg-cyan-500 disabled:bg-cyan-600/40 disabled:text-white/50 text-white text-[10px] uppercase tracking-widest font-black transition-all shadow-lg active:scale-95"
+                          className="bg-cyan-600 hover:bg-cyan-500"
+                          size="sm"
                         >
-                          {isExportingImages ? 'Exporting...' : `Export Selected (${selectedImageUrls.length})`}
-                        </button>
+                          {isExportingImages ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Exporting...</> : `Export Selected (${selectedImageUrls.length})`}
+                        </Button>
                       </div>
                     </div>
                     {imageExportError && (
-                      <div className="rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs text-red-200">
-                        {imageExportError}
-                      </div>
+                      <Alert tone="danger">{imageExportError}</Alert>
                     )}
                     {imageUrls.length === 0 ? (
-                      <div className="border border-dashed border-white/10 rounded-2xl py-16 flex flex-col items-center justify-center opacity-30 italic font-bold uppercase tracking-[0.3em] text-xs">
-                        No scraped image URLs yet
-                      </div>
+                      <EmptyState
+                        icon={<ImageIcon className="h-8 w-8" />}
+                        title="No scraped image URLs yet"
+                        description="Load a harvest file or run image extraction to populate export-ready image sources."
+                      />
                     ) : (
                       <div className="space-y-3">
                         {imageUrls.map((src, index) => {
@@ -3908,9 +4076,12 @@ export default function App() {
                   <div className="space-y-4 flex-1">
                     <h3 className="text-[10px] font-bold uppercase tracking-widest text-white/40">Extracted Assets ({extractedImages.length})</h3>
                     {extractedImages.length === 0 ? (
-                      <div className="border border-dashed border-white/10 rounded-2xl py-24 flex flex-col items-center justify-center opacity-20 italic font-bold uppercase tracking-[0.3em] text-xs h-64">
-                         No Extractions Yet
-                      </div>
+                      <EmptyState
+                        icon={<ImageIcon className="h-8 w-8" />}
+                        title="No extracted assets yet"
+                        description="Source an image from a product URL to generate formatted assets for export."
+                        className="h-64"
+                      />
                     ) : (
                       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-6">
                         {extractedImages.map((img, i) => (
@@ -3955,7 +4126,7 @@ export default function App() {
           </div>
 
           {/* DYNAMIC SYSTEM BAR */}
-          <div id="stats-bar" className="h-24 border-t border-cyan-900/40 px-8 flex items-center justify-between bg-[#030712] shrink-0 relative overflow-hidden">
+          <div id="stats-bar" className="h-24 border-t border-cyan-900/40 px-8 hidden lg:flex items-center justify-between bg-[#030712] shrink-0 relative overflow-hidden">
              {/* Tech Grid Background */}
              <div className="absolute inset-0 bg-[linear-gradient(to_right,#0891b222_1px,transparent_1px),linear-gradient(to_bottom,#0891b222_1px,transparent_1px)] bg-[size:24px_24px] [mask-image:linear-gradient(to_right,transparent,black_10%,black_90%,transparent)] pointer-events-none"></div>
              
@@ -4045,6 +4216,7 @@ export default function App() {
                 </div>
                 <button 
                   onClick={() => setIsScreenshotExpanded(false)}
+                  aria-label="Close screenshot preview"
                   className="p-3 hover:bg-red-500/20 rounded-xl transition-colors text-white/30 hover:text-red-500 group"
                 >
                   <X className="w-5 h-5 group-hover:rotate-90 transition-transform" />
@@ -4115,6 +4287,7 @@ export default function App() {
                   </button>
                   <button 
                     onClick={() => setIsModalOpen(false)}
+                    aria-label="Close report modal"
                     className="p-3 hover:bg-red-500/20 rounded-xl transition-colors text-white/30 hover:text-red-500 group"
                   >
                     <X className="w-5 h-5 group-hover:rotate-90 transition-transform" />
@@ -4126,7 +4299,7 @@ export default function App() {
                 {activeHarvestEntry && isEditingActiveHarvestEntry ? (
                   <div className="space-y-4">
                     {harvestSaveError && (
-                      <div className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-xs text-red-200">{harvestSaveError}</div>
+                      <Alert tone="danger">{harvestSaveError}</Alert>
                     )}
                     <textarea
                       value={editedHarvestContent}
@@ -4179,7 +4352,7 @@ export default function App() {
                     <p className="text-[10px] text-white/30 font-mono">SKU: {viewingPdfSku}</p>
                   </div>
                 </div>
-                <button onClick={() => { setViewingPdfContent(null); setViewingPdfSku(null); }} className="p-2 rounded-full hover:bg-white/5 transition-all outline-none">
+                <button onClick={() => { setViewingPdfContent(null); setViewingPdfSku(null); }} aria-label="Close PDF text modal" className="p-2 rounded-full hover:bg-white/5 transition-all outline-none">
                   <X className="w-5 h-5 text-white/40" />
                 </button>
               </div>
@@ -4206,7 +4379,7 @@ export default function App() {
                     <p className="text-[10px] text-white/30 font-mono">SKU: {editingOutputSku}</p>
                   </div>
                 </div>
-                <button onClick={() => setViewingOutput(null)} className="p-2 rounded-full hover:bg-white/5 transition-all outline-none">
+                <button onClick={() => setViewingOutput(null)} aria-label="Close output editor" className="p-2 rounded-full hover:bg-white/5 transition-all outline-none">
                   <X className="w-5 h-5 text-white/40" />
                 </button>
               </div>
@@ -4295,7 +4468,7 @@ export default function App() {
                       className="bg-white/5 border border-white/10 rounded-full pl-9 pr-4 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500/50 w-48 transition-all"
                     />
                   </div>
-                  <button onClick={() => setShowHarvestModal(false)} className="p-2 rounded-full hover:bg-white/5 transition-all text-white/40 outline-none">
+                  <button onClick={() => setShowHarvestModal(false)} aria-label="Close harvest history" className="p-2 rounded-full hover:bg-white/5 transition-all text-white/40 outline-none">
                     <X className="w-5 h-5 text-white/40" />
                   </button>
                 </div>
@@ -4355,7 +4528,7 @@ export default function App() {
           </div>
         )}
       </AnimatePresence>
-      </div>
+      </AppShell>
       )}
     </ErrorBoundary>
   );

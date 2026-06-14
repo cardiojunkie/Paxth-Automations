@@ -10,7 +10,7 @@ export interface LogEntry {
 
 export type ExtractionStrategy =
   | 'LLMExtractionStrategy'
-  | 'GroqExtractionStrategy'
+  | 'AIExtractionStrategy'
   | 'JsonLdExtractionStrategy'
   | 'WholeCaptureStrategy';
 
@@ -66,7 +66,7 @@ export interface AppSettings {
   bullets: string;
   description: string;
   keywords: string;
-  groqApiKey: string;
+  aiCreditsApiKey: string;
   attributeSets: AttributeSet[];
   selectorPresets: SelectorPreset[];
   plpSelectorPresets: PlpPreset[];
@@ -173,7 +173,7 @@ export interface DiscoveredLink {
 export interface ScrapeResponse {
   text: string;
   rawText?: string | null;
-  groqResult?: string | null;
+  aiResult?: string | null;
   imageUrls?: string[];
   screenshot?: string | null;
   title?: string | null;
@@ -181,7 +181,7 @@ export interface ScrapeResponse {
   secondary?: {
     text: string;
     rawText?: string | null;
-    groqResult?: string | null;
+    aiResult?: string | null;
     title?: string | null;
     strategy?: string;
   } | null;

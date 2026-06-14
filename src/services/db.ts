@@ -1,5 +1,5 @@
-import admin from 'firebase-admin';
-import { getFirestore } from 'firebase-admin/firestore';
+import { cert, getApp, getApps, initializeApp } from 'firebase-admin/app';
+import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 import fs from 'fs';
 import path from 'path';
 
@@ -60,7 +60,7 @@ const loadServiceAccount = () => {
 };
 
 // Safely initialize Firebase Admin
-let db: admin.firestore.Firestore | null = null;
+let db: Firestore | null = null;
 try {
   const firebaseConfigPath = path.join(process.cwd(), 'firebase-applet-config.json');
   if (fs.existsSync(firebaseConfigPath)) {
@@ -74,19 +74,19 @@ try {
     }
 
     // Make sure we only initialize once
-    if (!admin.apps.length) {
+    if (!getApps().length) {
       if (serviceAccount) {
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount),
+        initializeApp({
+          credential: cert(serviceAccount),
           projectId: config.projectId
         });
       } else {
-        admin.initializeApp({ projectId: config.projectId });
+        initializeApp({ projectId: config.projectId });
       }
     }
     // Set up with the specified databaseId
     const databaseId = config.firestoreDatabaseId !== '(default)' && config.firestoreDatabaseId ? config.firestoreDatabaseId : undefined;
-    db = getFirestore(admin.app(), databaseId);
+    db = getFirestore(getApp(), databaseId);
     // Test connection silently
     if (db && canUseFirestore('settings')) {
       db.collection('settings').doc('connection_test').set({ 
@@ -174,6 +174,16 @@ const isNonEmptyObject = (value: unknown): value is Record<string, unknown> =>
 const normalizeHarvestFilename = (filename: string) => {
   const safeName = path.basename(filename).replace(/[^a-z0-9._-]/gi, '_');
   return safeName.toLowerCase().endsWith('.md') ? safeName : `${safeName}.md`;
+};
+
+const SAFE_STORAGE_KEY_PATTERN = /^[a-zA-Z0-9_-]{1,100}$/;
+
+const normalizeStorageKey = (value: string, label = 'storage key') => {
+  const normalized = String(value || '').trim();
+  if (!SAFE_STORAGE_KEY_PATTERN.test(normalized)) {
+    throw new Error(`Invalid ${label}`);
+  }
+  return normalized;
 };
 
 type HarvestFieldName = 'content' | 'raw_content' | 'secondary_content' | 'secondary_raw_content';
@@ -444,26 +454,28 @@ export const dbService = {
 
   /** Fast per-SKU harvest existence check. O(1). */
   async harvestExists(sku: string): Promise<boolean> {
+    const safeSku = normalizeStorageKey(sku, 'SKU');
     if (db && canUseFirestore('harvest')) {
       try {
-        const docSnap = await db.collection('harvests').doc(sku).get();
+        const docSnap = await db.collection('harvests').doc(safeSku).get();
         return docSnap.exists;
       } catch { /* fallback */ }
     }
-    return fs.existsSync(path.join(HARVEST_DIR, `${sku}.md`));
+    return fs.existsSync(path.join(HARVEST_DIR, `${safeSku}.md`));
   },
 
   // Harvests
   async getHarvest(sku: string) {
+    const safeSku = normalizeStorageKey(sku, 'SKU');
     if (db && canUseFirestore('harvest')) {
       try {
-        const docSnap = await db.collection('harvests').doc(sku).get();
+        const docSnap = await db.collection('harvests').doc(safeSku).get();
         if (docSnap.exists) return docSnap.data()?.content || null;
       } catch (e: any) {
         // ignore
       }
     }
-    const fp = path.join(HARVEST_DIR, `${sku}.md`);
+    const fp = path.join(HARVEST_DIR, `${safeSku}.md`);
     if (fs.existsSync(fp)) return fs.readFileSync(fp, 'utf8');
     return null;
   },
@@ -490,10 +502,11 @@ export const dbService = {
     rawContent?: string,
     secondaryRawContent?: string,
   ) {
+    const safeSku = normalizeStorageKey(sku, 'SKU');
     if (db && canUseFirestore('harvest')) {
       try {
         const docData: any = {
-          sku,
+          sku: safeSku,
           content,
           updated_at: new Date().toISOString(),
         };
@@ -506,32 +519,32 @@ export const dbService = {
         if (secondaryRawContent !== undefined) {
           docData.secondary_raw_content = secondaryRawContent;
         }
-        await db.collection('harvests').doc(sku).set(docData);
-        console.log(`[Firestore] Successfully saved harvest for SKU: ${sku}`);
+        await db.collection('harvests').doc(safeSku).set(docData);
+        console.log(`[Firestore] Successfully saved harvest for SKU: ${safeSku}`);
       } catch (e: any) {
         console.error("[Firestore ERROR] Failed to save harvest:", e.message);
       }
     }
     try {
-      await fs.promises.writeFile(path.join(HARVEST_DIR, `${sku}.md`), content);
+      await fs.promises.writeFile(path.join(HARVEST_DIR, `${safeSku}.md`), content);
     } catch (e: any) {
       console.error('[DB] saveHarvest file write failed:', e.message);
       throw e;
     }
     if (secondaryContent !== undefined) {
-      await fs.promises.writeFile(path.join(HARVEST_DIR, `${sku}_secondary.md`), secondaryContent).catch((e: any) => {
+      await fs.promises.writeFile(path.join(HARVEST_DIR, `${safeSku}_secondary.md`), secondaryContent).catch((e: any) => {
         console.error('[DB] saveHarvest secondary file write failed:', e.message);
         throw e;
       });
     }
     if (rawContent !== undefined) {
-      await fs.promises.writeFile(path.join(HARVEST_DIR, `${sku}_raw.md`), rawContent).catch((e: any) => {
+      await fs.promises.writeFile(path.join(HARVEST_DIR, `${safeSku}_raw.md`), rawContent).catch((e: any) => {
         console.error('[DB] saveHarvest raw file write failed:', e.message);
         throw e;
       });
     }
     if (secondaryRawContent !== undefined) {
-      await fs.promises.writeFile(path.join(HARVEST_DIR, `${sku}_secondary_raw.md`), secondaryRawContent).catch((e: any) => {
+      await fs.promises.writeFile(path.join(HARVEST_DIR, `${safeSku}_secondary_raw.md`), secondaryRawContent).catch((e: any) => {
         console.error('[DB] saveHarvest secondary raw file write failed:', e.message);
         throw e;
       });
@@ -560,18 +573,19 @@ export const dbService = {
     });
   },
   async deleteHarvest(sku: string) {
+    const safeSku = normalizeStorageKey(sku, 'SKU');
     if (db && canUseFirestore('harvest')) {
       try {
-        await db.collection('harvests').doc(sku).delete();
+        await db.collection('harvests').doc(safeSku).delete();
       } catch (e: any) {
         // ignore
       }
     }
     const filenames = [
-      `${sku}.md`,
-      `${sku}_raw.md`,
-      `${sku}_secondary.md`,
-      `${sku}_secondary_raw.md`,
+      `${safeSku}.md`,
+      `${safeSku}_raw.md`,
+      `${safeSku}_secondary.md`,
+      `${safeSku}_secondary_raw.md`,
     ];
     filenames.forEach((name) => {
       const fp = path.join(HARVEST_DIR, name);
@@ -579,11 +593,12 @@ export const dbService = {
     });
   },
   async deleteSku(sku: string) {
+    const safeSku = normalizeStorageKey(sku, 'SKU');
     // Explicitly delete the per-SKU Firestore document so it no longer
     // appears in listSkusPaginated queries after the index file is updated.
     if (db && canUseFirestore('sku')) {
       try {
-        await db.collection('skus').doc(sku).delete();
+        await db.collection('skus').doc(safeSku).delete();
       } catch (e: any) {
         // ignore — file path is always the source of truth
       }
@@ -646,11 +661,12 @@ export const dbService = {
 
   // Outputs
   async getOutput(sku: string) {
-    const fp = path.join(OUTPUTS_DIR, `${sku}.json`);
+    const safeSku = normalizeStorageKey(sku, 'SKU');
+    const fp = path.join(OUTPUTS_DIR, `${safeSku}.json`);
     if (fs.existsSync(fp)) return JSON.parse(fs.readFileSync(fp, 'utf8'));
     if (db && canUseFirestore('outputs')) {
       try {
-        const docSnap = await db.collection('outputs').doc(sku).get();
+        const docSnap = await db.collection('outputs').doc(safeSku).get();
         if (docSnap.exists) return docSnap.data()?.data || null;
       } catch (e: any) {
         // ignore
@@ -659,29 +675,31 @@ export const dbService = {
     return null;
   },
   async saveOutput(sku: string, data: any) {
+    const safeSku = normalizeStorageKey(sku, 'SKU');
     if (db && canUseFirestore('outputs')) {
       try {
-        await db.collection('outputs').doc(sku).set({ sku, data });
+        await db.collection('outputs').doc(safeSku).set({ sku: safeSku, data });
       } catch (e: any) {
         // ignore
       }
     }
     fs.promises.writeFile(
-      path.join(OUTPUTS_DIR, `${sku}.json`),
+      path.join(OUTPUTS_DIR, `${safeSku}.json`),
       JSON.stringify(data, null, 2),
     ).catch((e: any) => {
       console.error('[DB] saveOutput file write failed:', e.message);
     });
   },
   async deleteOutput(sku: string) {
+    const safeSku = normalizeStorageKey(sku, 'SKU');
     if (db && canUseFirestore('outputs')) {
       try {
-        await db.collection('outputs').doc(sku).delete();
+        await db.collection('outputs').doc(safeSku).delete();
       } catch (e: any) {
         // ignore
       }
     }
-    const fp = path.join(OUTPUTS_DIR, `${sku}.json`);
+    const fp = path.join(OUTPUTS_DIR, `${safeSku}.json`);
     if (fs.existsSync(fp)) fs.unlinkSync(fp);
   },
   async listOutputs() {

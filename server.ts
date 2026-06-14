@@ -1,24 +1,24 @@
+import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
-import dotenv from "dotenv";
+import react from '@vitejs/plugin-react';
+import tailwindcss from '@tailwindcss/vite';
 import path from "path";
 import { fileURLToPath } from "url";
+import { createHash, timingSafeEqual } from "crypto";
 import * as cheerio from "cheerio";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import multer from "multer";
 import { createRequire } from "module";
 
-// Load environment variables from .env file (must be before any usage)
-dotenv.config();
-
 const __require = createRequire(import.meta.url);
 const pdfParse = __require("pdf-parse");
-import Groq from "groq-sdk";
+import OpenAI from "openai";
 import TurndownService from "turndown";
 import { z } from "zod";
 import { BusyError, HttpError } from "./src/server/errors.js";
-import { isPrivateIpAddress, assertSafeTargetUrl } from "./src/server/ssrf.js";
+import { isPrivateIpAddress, assertSafeTargetUrl, assertSafeBrowserRequestUrl } from "./src/server/ssrf.js";
 import {
   signSession,
   verifySession,
@@ -55,7 +55,7 @@ const __dirname = path.dirname(__filename);
 
 import fs from "fs";
 import { dbService } from "./src/services/db.js";
-import * as XLSX from "xlsx";
+import * as ExcelJS from "exceljs";
 import sharp from "sharp";
 
 // Initialization handled by dbService
@@ -77,16 +77,16 @@ const IMAGES_DIR = path.join(process.cwd(), 'public', 'images');
 interface ScrapeTargetData {
   url: string;
   selector?: string;
-  extractWithGroq?: boolean;
+  extractWithAI?: boolean;
   enableScreenshot?: boolean;
-  strategy?: 'default' | 'GroqExtractionStrategy' | 'JsonLdExtractionStrategy' | 'WholeCaptureStrategy';
+  strategy?: 'default' | 'AIExtractionStrategy' | 'JsonLdExtractionStrategy' | 'WholeCaptureStrategy';
   deepScroll?: boolean;
 }
 
 interface ScrapeResult {
   markdown: string;
   rawMarkdown?: string | null;
-  groqResult?: string | null;
+  aiResult?: string | null;
   imageUrls: string[];
   screenshotBase64?: string | null;
   pageTitle: string | null;
@@ -106,10 +106,34 @@ interface ServerSettings {
   bullets: string;
   description: string;
   keywords: string;
-  groqApiKey: string;
+  aiCreditsApiKey: string;
   attributeSets: AttributeSetConfig[];
   selectorPresets: Array<{ name: string; selector: string; strategy: string }>;
   plpSelectorPresets: Array<{ name: string; selector: string }>;
+}
+
+async function buildXlsxBuffer(rows: any[], headers: string[]): Promise<Buffer> {
+  const workbook = new ExcelJS.Workbook();
+  const worksheet = workbook.addWorksheet('MasterUpload');
+  worksheet.columns = headers.map((header) => ({
+    header,
+    key: header,
+    width: Math.min(Math.max(header.length + 4, 12), 48),
+  }));
+
+  rows.forEach((row) => {
+    const normalizedRow: Record<string, unknown> = {};
+    headers.forEach((header) => {
+      normalizedRow[header] = row?.[header] ?? '';
+    });
+    worksheet.addRow(normalizedRow);
+  });
+
+  worksheet.getRow(1).font = { bold: true };
+  worksheet.views = [{ state: 'frozen', ySplit: 1 }];
+
+  const buffer = await workbook.xlsx.writeBuffer();
+  return Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer as ArrayBuffer);
 }
 
 // Keep flexible typing due to CloakBrowser/Playwright incompatibilities
@@ -125,6 +149,28 @@ const parseBooleanEnv = (value: string | undefined, fallback: boolean) => {
   if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
   if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
   return fallback;
+};
+
+const getInternalAccessCode = () =>
+  (process.env.AUTH_LOGIN_CODE || process.env.INTERNAL_ACCESS_CODE || '').trim();
+
+const verifyInternalAccessCode = (provided: unknown, expected: string): boolean => {
+  if (typeof provided !== 'string') return false;
+  if (!expected && process.env.NODE_ENV !== 'production') return provided.trim().length > 0;
+  if (!expected) return false;
+  const providedHash = createHash('sha256').update(provided).digest();
+  const expectedHash = createHash('sha256').update(expected).digest();
+  return providedHash.length === expectedHash.length && timingSafeEqual(providedHash, expectedHash);
+};
+
+const SAFE_STORAGE_KEY_PATTERN = /^[a-zA-Z0-9_-]{1,100}$/;
+
+const requireSafeStorageKey = (value: unknown, label = 'SKU') => {
+  const normalized = String(value || '').trim();
+  if (!SAFE_STORAGE_KEY_PATTERN.test(normalized)) {
+    throw new HttpError(400, `${label} must be 1-100 characters using only letters, numbers, hyphens, and underscores.`);
+  }
+  return normalized;
 };
 
 const IMAGE_NEGATIVE_KEYWORDS = [
@@ -374,12 +420,46 @@ turndownService.addRule('clean-attributes', {
 
 turndownService.keep(['table', 'thead', 'tbody', 'tr', 'th', 'td']);
 
-const buildGroqClient = (apiKey?: string | null) => {
+const buildAICreditsClient = (apiKey?: string | null) => {
   const trimmedApiKey = apiKey?.trim();
-  return trimmedApiKey ? new Groq({ apiKey: trimmedApiKey }) : null;
+  if (!trimmedApiKey) return null;
+  return new OpenAI({
+    apiKey: trimmedApiKey,
+    baseURL: 'https://api.aicredits.in/v1',
+  });
 };
 
-const groq = buildGroqClient(process.env.GROQ_API_KEY);
+const aiCreditsClient = buildAICreditsClient(process.env.AI_CREDITS_API_KEY);
+const DEFAULT_MAP_AI_MODEL = 'deepseek/deepseek-v4-flash';
+const AI_CREDITS_MISSING_KEY_MESSAGE = 'AI Credits API key is not configured. Add AI_CREDITS_API_KEY in .env or configure it in Settings → Connectivity.';
+const MAP_AI_MISSING_MODEL_MESSAGE = 'Please select or enter a model for Map AI.';
+const AI_CREDITS_AUTH_MESSAGE = 'AI Credits authentication failed. Check your API key in .env or Settings → Connectivity.';
+const MAP_AI_REQUEST_FAILED_MESSAGE = 'Map AI request failed while calling AI Credits.';
+
+function normalizeMapAiModel(aiModel?: string | null): string {
+  const model = (aiModel ?? DEFAULT_MAP_AI_MODEL).toString().trim();
+  if (!model) {
+    throw new Error(MAP_AI_MISSING_MODEL_MESSAGE);
+  }
+  return model;
+}
+
+function isAiCreditsAuthError(error: any): boolean {
+  const status = error?.status ?? error?.statusCode ?? error?.response?.status;
+  const code = error?.code?.toString().toLowerCase?.() || '';
+  const message = error?.message?.toString().toLowerCase?.() || '';
+  return status === 401 || status === 403 || code.includes('auth') || message.includes('invalid api key') || message.includes('unauthorized');
+}
+
+function toMapAiPublicError(error: any): Error {
+  if (error?.message === AI_CREDITS_MISSING_KEY_MESSAGE || error?.message === MAP_AI_MISSING_MODEL_MESSAGE) {
+    return error;
+  }
+  if (isAiCreditsAuthError(error)) {
+    return new Error(AI_CREDITS_AUTH_MESSAGE);
+  }
+  return new Error(MAP_AI_REQUEST_FAILED_MESSAGE);
+}
 
 // All Zod schemas are imported from src/server/schemas.ts
 
@@ -464,10 +544,17 @@ async function startServer() {
     .map((v) => v.trim())
     .filter(Boolean);
   const ALLOW_ALL_CORS = CORS_ORIGINS.includes('*');
+  const internalAccessCode = getInternalAccessCode();
 
   if (requireSignedSessions) {
     if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.trim().length < 32) {
       throw new Error('[SERVER] SESSION_SECRET must be set to at least 32 characters in production.');
+    }
+    if (internalAccessCode.length < 12) {
+      throw new Error('[SERVER] AUTH_LOGIN_CODE must be set to at least 12 characters in production.');
+    }
+    if (ALLOW_ALL_CORS) {
+      throw new Error('[SERVER] CORS_ORIGINS=* is not allowed in production with credentialed sessions.');
     }
     if (cookieSameSite === 'none' && CORS_ORIGINS.length === 0) {
       throw new Error('[SERVER] COOKIE_SAME_SITE=none requires explicit CORS_ORIGINS in production.');
@@ -497,6 +584,7 @@ async function startServer() {
   });
 
   const rateState = new Map<string, { count: number; windowStart: number }>();
+  const authRateState = new Map<string, { count: number; windowStart: number }>();
   
   // Cleanup old rate limit entries every minute (prevents memory leak)
   setInterval(() => {
@@ -506,6 +594,12 @@ async function startServer() {
     for (const [ip, state] of rateState.entries()) {
       if (now - state.windowStart > windowMs) {
         rateState.delete(ip);
+        cleaned++;
+      }
+    }
+    for (const [ip, state] of authRateState.entries()) {
+      if (now - state.windowStart > 15 * 60_000) {
+        authRateState.delete(ip);
         cleaned++;
       }
     }
@@ -529,6 +623,25 @@ async function startServer() {
     existing.count += 1;
     if (existing.count > maxPerWindow) {
       return res.status(429).json({ error: 'Too many requests. Please retry shortly.' });
+    }
+    return next();
+  });
+
+  app.use('/api/auth/login', (req, res, next) => {
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const existing = authRateState.get(ip);
+    const windowMs = 15 * 60_000;
+    const maxPerWindow = 10;
+
+    if (!existing || now - existing.windowStart > windowMs) {
+      authRateState.set(ip, { count: 1, windowStart: now });
+      return next();
+    }
+
+    existing.count += 1;
+    if (existing.count > maxPerWindow) {
+      return res.status(429).json({ error: 'Too many login attempts. Please retry later.' });
     }
     return next();
   });
@@ -673,16 +786,43 @@ async function startServer() {
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-  const upload = multer({ storage: multer.memoryStorage() });
+  const MAX_PDF_SIZE = 50 * 1024 * 1024; // 50MB
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_PDF_SIZE, files: 1 },
+  });
+  const handlePdfUpload: express.RequestHandler = (req, res, next) => {
+    upload.single("file")(req, res, (err: any) => {
+      if (!err) return next();
+      if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: "PDF file too large. Maximum size: 50MB" });
+      }
+      return next(err);
+    });
+  };
+
+  async function installSafeRequestInterceptor(context: any) {
+    if (!context || typeof context.route !== 'function') return;
+    await context.route('**/*', async (route: any) => {
+      const requestUrl = route.request().url();
+      try {
+        await assertSafeBrowserRequestUrl(requestUrl);
+        await route.continue();
+      } catch (e: any) {
+        console.warn(`[SSRF] Blocked browser request to ${requestUrl}: ${e?.message || 'unsafe URL'}`);
+        await route.abort();
+      }
+    });
+  }
 
   // ── Queue handler registrations ────────────────────────────────────────────
   // These closures capture the helper functions declared later in startServer
   // (scrapeTarget, performInspection, loadSettings, resolveGroqClient) — all
   // `async function` declarations so they are hoisted within startServer scope.
   jobQueue.registerHandler('scrape' as AsyncJobType, async (payload) => {
-    const { url, selector, extractWithGroq, enableScreenshot, strategy, deepScroll, sku, secondaryTarget } =
+    const { url, selector, extractWithAI, enableScreenshot, strategy, deepScroll, sku, secondaryTarget } =
       payload as unknown as ScrapeTargetData & { sku?: string; secondaryTarget?: { url: string; selector?: string; strategy?: string } };
-    const primaryResult = await scrapeTarget({ url, selector, extractWithGroq, enableScreenshot, strategy, deepScroll });
+    const primaryResult = await scrapeTarget({ url, selector, extractWithAI, enableScreenshot, strategy, deepScroll });
     let secondaryResult: ScrapeResult | null = null;
     if (secondaryTarget?.url) {
       try {
@@ -690,7 +830,7 @@ async function startServer() {
           url: secondaryTarget.url,
           selector: secondaryTarget.selector || selector,
           strategy: (secondaryTarget.strategy || strategy) as ScrapeTargetData['strategy'],
-          extractWithGroq,
+          extractWithAI,
           enableScreenshot,
           deepScroll,
         });
@@ -701,17 +841,17 @@ async function startServer() {
     if (sku) {
       const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
       try {
-        const shouldPreferGroqPrimary = strategy === 'GroqExtractionStrategy';
-        const primaryHarvestContent = shouldPreferGroqPrimary
-          ? ensureHarvestImageSections(primaryResult.groqResult, primaryResult.markdown)
+        const shouldPreferAIPrimary = strategy === 'AIExtractionStrategy';
+        const primaryHarvestContent = shouldPreferAIPrimary
+          ? ensureHarvestImageSections(primaryResult.aiResult, primaryResult.markdown)
           : primaryResult.markdown;
         const primaryRawHarvestContent = primaryResult.rawMarkdown
           ? ensureHarvestImageSections(primaryResult.rawMarkdown, primaryResult.markdown)
           : undefined;
-        const shouldPreferGroqSecondary = secondaryResult?.strategy === 'GroqExtractionStrategy';
+        const shouldPreferAISecondary = secondaryResult?.strategy === 'AIExtractionStrategy';
         const secondaryHarvestContent = secondaryResult
-          ? (shouldPreferGroqSecondary
-              ? ensureHarvestImageSections(secondaryResult.groqResult, secondaryResult.markdown)
+          ? (shouldPreferAISecondary
+              ? ensureHarvestImageSections(secondaryResult.aiResult, secondaryResult.markdown)
               : secondaryResult.markdown)
           : undefined;
         const secondaryRawHarvestContent = secondaryResult?.rawMarkdown
@@ -734,7 +874,7 @@ async function startServer() {
       success: true,
       text: primaryResult.markdown,
       rawText: primaryResult.rawMarkdown,
-      groqResult: primaryResult.groqResult,
+      aiResult: primaryResult.aiResult,
       imageUrls: primaryResult.imageUrls,
       title: primaryResult.pageTitle,
       url: primaryResult.url,
@@ -744,7 +884,7 @@ async function startServer() {
         url: secondaryResult.url,
         text: secondaryResult.markdown,
         rawText: secondaryResult.rawMarkdown,
-        groqResult: secondaryResult.groqResult,
+        aiResult: secondaryResult.aiResult,
         imageUrls: secondaryResult.imageUrls,
         title: secondaryResult.pageTitle,
         strategy: secondaryResult.strategy,
@@ -765,6 +905,7 @@ async function startServer() {
       console.log(`[SERVER] Discovery Mode Starting: ${url}`);
       const browserInstance = await getBrowser();
       context = await browserInstance.newContext();
+      await installSafeRequestInterceptor(context);
       const page = await context.newPage();
       try {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -854,8 +995,9 @@ async function startServer() {
       if (foundSet.mdRules) mdRules = `\nSPECIFIC MAPPING RULES (APPLY THESE STRICTLY): \n${foundSet.mdRules}\n`;
     }
 
-    const groqClient = await resolveGroqClient(settings);
-    if (!groqClient) throw new Error('Groq API Key is not configured. Please add it in Connectivity settings.');
+    const aiClient = await resolveAICreditsClient(settings);
+    if (!aiClient) throw new Error(AI_CREDITS_MISSING_KEY_MESSAGE);
+    const mapAiModel = normalizeMapAiModel(aiModel);
 
     const prompt = `
       TASK: High-Precision Product Specification Mapping
@@ -882,12 +1024,17 @@ async function startServer() {
       OUTPUT FORMAT: Return a valid JSON object where keys EXACTLY match the headers above.
     `;
 
-    const groqResponse = await groqClient.chat.completions.create({
-      messages: [{ role: 'user', content: prompt }],
-      model: (aiModel as string) || 'llama-3.3-70b-versatile',
-      response_format: { type: 'json_object' },
-    });
-    const outputData = JSON.parse(groqResponse.choices[0]?.message?.content || '{}');
+    let aiResponse;
+    try {
+      aiResponse = await aiClient.chat.completions.create({
+        messages: [{ role: 'user', content: prompt }],
+        model: mapAiModel,
+        response_format: { type: 'json_object' },
+      });
+    } catch (error: any) {
+      throw toMapAiPublicError(error);
+    }
+    const outputData = JSON.parse(aiResponse.choices[0]?.message?.content || '{}');
 
     const manualOverrides: any = {};
     if (skuRecord) {
@@ -954,11 +1101,10 @@ async function startServer() {
       });
     });
 
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(rows, { header: predefinedHeaders });
-    XLSX.utils.book_append_sheet(wb, ws, 'MasterUpload');
-    const bookType = format === 'xlsx' ? 'xlsx' : 'xls';
-    return XLSX.write(wb, { type: 'buffer', bookType });
+    if (format && format !== 'xlsx') {
+      throw new Error('Only xlsx export is supported');
+    }
+    return buildXlsxBuffer(rows, predefinedHeaders);
   });
 
   // ── End queue handler registrations ───────────────────────────────────────
@@ -979,7 +1125,7 @@ async function startServer() {
     }, 2_000);
   }
 
-  app.post("/api/upload-pdf", upload.single("file"), requireAuth, async (req, res) => {
+  app.post("/api/upload-pdf", requireAuth, handlePdfUpload, async (req, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({ error: "No file uploaded" });
@@ -990,8 +1136,7 @@ async function startServer() {
         return res.status(400).json({ error: "Only PDF files are allowed" });
       }
       
-      // File size validation (Security: Max 50MB, configurable)
-      const MAX_PDF_SIZE = 50 * 1024 * 1024; // 50MB
+      // File size validation kept as a second guard after multer's streaming limit.
       if (req.file.size > MAX_PDF_SIZE) {
         return res.status(413).json({ error: `PDF file too large. Maximum size: 50MB (got ${(req.file.size / 1024 / 1024).toFixed(2)}MB)` });
       }
@@ -1005,25 +1150,26 @@ async function startServer() {
       if (!sku) {
         return res.status(400).json({ error: "SKU is required" });
       }
+      const safeSku = requireSafeStorageKey(sku);
       
       // Save it to the index
       const indexData = await dbService.getSkuIndex();
-      const existing = indexData.find((item: any) => (item.sku || item.SKU)?.toString() === sku.toString());
+      const existing = indexData.find((item: any) => (item.sku || item.SKU)?.toString() === safeSku);
       if (existing) {
         existing.pdf_text = data.text;
       } else {
-        indexData.push({ sku, pdf_text: data.text });
+        indexData.push({ sku: safeSku, pdf_text: data.text });
       }
       await dbService.updateSkuIndex(indexData);
       
-      res.json({ message: "PDF processed successfully", sku, textPreview: data.text.substring(0, 500) });
+      res.json({ message: "PDF processed successfully", sku: safeSku, textPreview: data.text.substring(0, 500) });
     } catch (e: any) {
       console.error("[SERVER] Error processing PDF:", e);
-      res.status(500).json({ error: "Failed to process PDF", details: e.message });
+      res.status(e?.statusCode || 500).json({ error: "Failed to process PDF", details: e.message });
     }
   });
 
-  app.post("/api/sku/index", requireAuth, validateRequest(SKUIndexRequestSchema), async (req, res) => {
+  app.post("/api/sku/index", requireAuth, requireAdminRole, validateRequest(SKUIndexRequestSchema), async (req, res) => {
     const { data } = req.body;
     if (!data || !Array.isArray(data)) {
       return res.status(400).json({ error: "Invalid data format" });
@@ -1051,32 +1197,33 @@ async function startServer() {
   });
 
   // Bulk cascade-delete via POST to avoid browser stripping DELETE request bodies
-  app.post("/api/sku/index/purge", requireAuth, async (req, res) => {
+  app.post("/api/sku/index/purge", requireAuth, requireAdminRole, async (req, res) => {
     try {
       const { skus } = req.body;
       if (!Array.isArray(skus) || skus.length === 0) {
         return res.status(400).json({ error: 'skus array required' });
       }
-      const skuSet = new Set(skus.map((s: any) => s.toString()));
+      const safeSkus = skus.map((s: any) => requireSafeStorageKey(s));
+      const skuSet = new Set(safeSkus);
       const data = await dbService.getSkuIndex();
       const filtered = data.filter((item: any) => !skuSet.has((item.sku || item.SKU)?.toString()));
       await dbService.updateSkuIndex(filtered);
       await Promise.allSettled(
-        skus.map(async (sku: string) => {
+        safeSkus.map(async (sku: string) => {
           await dbService.deleteSku(sku).catch(() => {});
           await dbService.deleteHarvest(sku).catch(() => {});
           await dbService.deleteOutput(sku).catch(() => {});
         })
       );
-      res.json({ success: true, deleted: skus.length });
-    } catch (e) {
-      res.status(500).json({ error: 'Bulk delete failed' });
+      res.json({ success: true, deleted: safeSkus.length });
+    } catch (e: any) {
+      res.status(e?.statusCode || 500).json({ error: 'Bulk delete failed', details: e?.message });
     }
   });
 
-  app.delete("/api/sku/index/:sku", requireAuth, async (req, res) => {
+  app.delete("/api/sku/index/:sku", requireAuth, requireAdminRole, async (req, res) => {
     try {
-      const { sku } = req.params;
+      const sku = requireSafeStorageKey(req.params.sku);
       const data = await dbService.getSkuIndex();
       const filtered = data.filter((item: any) => (item.sku || item.SKU)?.toString() !== sku);
       await dbService.updateSkuIndex(filtered);
@@ -1086,8 +1233,8 @@ async function startServer() {
       await dbService.deleteHarvest(sku).catch(() => {});
       await dbService.deleteOutput(sku).catch(() => {});
       res.json({ success: true });
-    } catch (e) {
-      res.status(500).json({ error: "Failed to delete SKU" });
+    } catch (e: any) {
+      res.status(e?.statusCode || 500).json({ error: "Failed to delete SKU", details: e?.message });
     }
   });
 
@@ -1139,7 +1286,7 @@ async function startServer() {
     }
   });
 
-  app.delete("/api/harvest/:filename", requireAuth, async (req, res) => {
+  app.delete("/api/harvest/:filename", requireAuth, requireAdminRole, async (req, res) => {
     try {
       const { filename } = req.params;
       const sku = path
@@ -1148,10 +1295,10 @@ async function startServer() {
         .replace(/_secondary\.md$/i, '')
         .replace(/_raw\.md$/i, '')
         .replace(/\.md$/i, '');
-      await dbService.deleteHarvest(sku);
+      await dbService.deleteHarvest(requireSafeStorageKey(sku));
       res.json({ success: true });
-    } catch (e) {
-      res.status(500).json({ error: "Delete failed" });
+    } catch (e: any) {
+      res.status(e?.statusCode || 500).json({ error: "Delete failed", details: e?.message });
     }
   });
 
@@ -1162,19 +1309,18 @@ async function startServer() {
     }
 
     try {
-      // Basic filename sanitization
-      const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
+      const safeSku = requireSafeStorageKey(sku);
       await dbService.saveHarvest(safeSku, content);
       console.log(`[SERVER] Saved batch harvest: ${safeSku}`);
       res.json({ success: true, path: `${safeSku}.md` });
-    } catch (e) {
+    } catch (e: any) {
       console.error("[SERVER] Failed to save harvest:", e);
-      res.status(500).json({ error: "Failed to save data on server" });
+      res.status(e?.statusCode || 500).json({ error: "Failed to save data on server", details: e?.message });
     }
   });
 
   async function scrapeTarget(targetData: ScrapeTargetData): Promise<ScrapeResult> {
-    let { url, selector, extractWithGroq, enableScreenshot, strategy, deepScroll } = targetData;
+    let { url, selector, extractWithAI, enableScreenshot, strategy, deepScroll } = targetData;
     
     // Ensure URL has a valid scheme
     if (url && !/^https?:\/\//i.test(url)) {
@@ -1201,6 +1347,7 @@ async function startServer() {
           'Upgrade-Insecure-Requests': '1'
         }
       });
+      await installSafeRequestInterceptor(context);
 
       const page = await context.newPage();
       
@@ -1251,7 +1398,7 @@ async function startServer() {
           if (isAmazonError) {
              console.log("[SERVER] Playwright reload failed. Attempting pure fetch callback as Googlebot...");
              try {
-                const fetchResult = await fetch(url, {
+                const fetchResult = await fetchSafeExternal(url, {
                   headers: {
                     'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -1606,9 +1753,9 @@ async function startServer() {
         });
       }
 
-      let groqResult = null;
-      if (extractWithGroq && markdown && groq) {
-        const groqResponse = await groq.chat.completions.create({
+      let aiResult = null;
+      if (extractWithAI && markdown && aiCreditsClient) {
+        const aiResponse = await aiCreditsClient.chat.completions.create({
           messages: [
             {
               role: "system",
@@ -1619,15 +1766,15 @@ async function startServer() {
               content: `SOURCE TITLE: ${pageTitle}\n\nPAGE CONTENT:\n${markdown}`
             }
           ],
-          model: "llama-3.3-70b-versatile",
+          model: "deepseek/deepseek-v4-flash",
         });
-        groqResult = groqResponse.choices[0]?.message?.content;
-        if (groqResult && highQualityImageSection && !groqResult.includes('## High Quality Product Image URLs')) {
-          groqResult += "\n\n" + highQualityImageSection;
+        aiResult = aiResponse.choices[0]?.message?.content;
+        if (aiResult && highQualityImageSection && !aiResult.includes('## High Quality Product Image URLs')) {
+          aiResult += "\n\n" + highQualityImageSection;
         }
       }
 
-      return { markdown, rawMarkdown, groqResult, imageUrls, screenshotBase64, pageTitle, url, strategy };
+      return { markdown, rawMarkdown, aiResult, imageUrls, screenshotBase64, pageTitle, url, strategy };
     } catch (error: any) {
       if (context) {
         try {
@@ -1650,10 +1797,27 @@ async function startServer() {
     return u;
   }
 
+  async function fetchSafeExternal(inputUrl: string, init?: RequestInit): Promise<Response> {
+    let currentUrl = sanitizeUrl(inputUrl);
+    for (let redirectCount = 0; redirectCount <= 5; redirectCount++) {
+      await assertSafeTargetUrl(currentUrl);
+      const response = await fetch(currentUrl, { ...(init || {}), redirect: 'manual' });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('location');
+        if (!location) return response;
+        currentUrl = new URL(location, currentUrl).toString();
+        continue;
+      }
+      await assertSafeTargetUrl(response.url || currentUrl);
+      return response;
+    }
+    throw new Error('Too many redirects while fetching external URL');
+  }
+
   // API Route for scraping — non-blocking async (returns 202 + jobId).
   // Clients poll GET /api/queue/:jobId until completed then read .result.
   app.post("/api/scrape", requireAuth, validateRequest(ScrapeRequestSchema), async (req, res) => {
-    let { url, selector, extractWithGroq, enableScreenshot, sku, strategy, deepScroll, secondaryTarget } = req.body;
+    let { url, selector, extractWithAI, enableScreenshot, sku, strategy, deepScroll, secondaryTarget } = req.body;
 
     if (!url) {
       return res.status(400).json({ error: "URL is required" });
@@ -1662,9 +1826,14 @@ async function startServer() {
     try {
       try { new URL(sanitizeUrl(url)); } catch (e) { return res.status(400).json({ error: "Invalid URL format" }); }
       await assertSafeTargetUrl(sanitizeUrl(url));
+      if (secondaryTarget?.url) {
+        const safeSecondaryUrl = sanitizeUrl(secondaryTarget.url);
+        try { new URL(safeSecondaryUrl); } catch (e) { return res.status(400).json({ error: "Invalid secondary URL format" }); }
+        await assertSafeTargetUrl(safeSecondaryUrl);
+      }
 
       const primaryJob = jobQueue.enqueue('scrape', {
-        url: sanitizeUrl(url), selector, extractWithGroq, enableScreenshot, strategy, deepScroll, sku,
+        url: sanitizeUrl(url), selector, extractWithAI, enableScreenshot, strategy, deepScroll, sku,
         secondaryTarget: secondaryTarget && secondaryTarget.url
           ? { url: sanitizeUrl(secondaryTarget.url), selector: secondaryTarget.selector || selector, strategy: secondaryTarget.strategy || strategy }
           : undefined,
@@ -1707,6 +1876,7 @@ async function startServer() {
       console.log(`[SERVER] Inspection Started: ${url}`);
       const browserInstance = await getBrowser();
       context = await browserInstance.newContext();
+      await installSafeRequestInterceptor(context);
       const page = await context.newPage();
       
       await page.addInitScript(() => {
@@ -1868,18 +2038,18 @@ async function startServer() {
             
             Return a JSON object with:
             - "selectors": string (a comma separated list of all relevant selectors to capture as much data as possible, e.g. "h1, .price, #description")
-            - "strategy": string ("GroqExtractionStrategy", "JsonLdExtractionStrategy", or "WholeCaptureStrategy" - choose based on what looks most robust)
+            - "strategy": string ("AIExtractionStrategy", "JsonLdExtractionStrategy", or "WholeCaptureStrategy" - choose based on what looks most robust)
             - "reasoning": string (short description of why these were chosen)
         `;
 
-        const groqClient = await resolveGroqClient();
-        if (!groqClient) {
-          throw new Error("Groq API Key is not configured. Please add it in Connectivity settings.");
+        const aiClient = await resolveAICreditsClient();
+        if (!aiClient) {
+          throw new Error("AI Credits API Key is not configured. Please add it in Connectivity settings.");
         }
 
-        const chatCompletion = await groqClient.chat.completions.create({
+        const chatCompletion = await aiClient.chat.completions.create({
             messages: [{ role: "user", content: prompt }],
-            model: "llama-3.3-70b-versatile",
+            model: "deepseek/deepseek-v4-flash",
             response_format: { type: "json_object" }
         });
 
@@ -2008,24 +2178,22 @@ async function startServer() {
 
   app.post("/api/outputs/:sku", requireAuth, async (req, res) => {
     try {
-      const { sku } = req.params;
+      const sku = requireSafeStorageKey(req.params.sku);
       const data = req.body;
-      const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
-      await dbService.saveOutput(safeSku, data);
+      await dbService.saveOutput(sku, data);
       res.json({ success: true });
-    } catch (e) {
-      res.status(500).json({ error: "Failed to update output" });
+    } catch (e: any) {
+      res.status(e?.statusCode || 500).json({ error: "Failed to update output", details: e?.message });
     }
   });
 
-  app.delete("/api/outputs/:sku", requireAuth, async (req, res) => {
+  app.delete("/api/outputs/:sku", requireAuth, requireAdminRole, async (req, res) => {
     try {
-      const { sku } = req.params;
-      const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
-      await dbService.deleteOutput(safeSku);
+      const sku = requireSafeStorageKey(req.params.sku);
+      await dbService.deleteOutput(sku);
       res.json({ success: true });
-    } catch (e) {
-      res.status(500).json({ error: "Delete failed" });
+    } catch (e: any) {
+      res.status(e?.statusCode || 500).json({ error: "Delete failed", details: e?.message });
     }
   });
 
@@ -2040,7 +2208,8 @@ async function startServer() {
         res.status(404).json({ error: "File not found" });
       }
     } catch (e) {
-      res.status(500).json({ error: "Failed to read output" });
+      const err = e as any;
+      res.status(err?.statusCode || 500).json({ error: "Failed to read output", details: err?.message });
     }
   });
 
@@ -2103,14 +2272,9 @@ async function startServer() {
          });
       });
       
-      const wb = XLSX.utils.book_new();
-      const ws = XLSX.utils.json_to_sheet(rows, { header: predefinedHeaders });
-      XLSX.utils.book_append_sheet(wb, ws, "MasterUpload");
-      
-      // Export as .xls
-      const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xls' });
-      res.setHeader('Content-Type', 'application/vnd.ms-excel');
-      res.setHeader('Content-Disposition', 'attachment; filename=CMS_Upload_Master.xls');
+      const buf = await buildXlsxBuffer(rows, predefinedHeaders);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', 'attachment; filename=CMS_Upload_Master.xlsx');
       res.send(buf);
     } catch (e) {
       console.error('Error generating report:', e);
@@ -2118,13 +2282,13 @@ async function startServer() {
     }
   });
 
-  let currentGroq: Groq | null = groq;
+  let currentAIClient: OpenAI | null = aiCreditsClient;
   const defaultSettings: ServerSettings = {
     title: '',
     bullets: '',
     description: '',
     keywords: '',
-    groqApiKey: '',
+    aiCreditsApiKey: '',
     attributeSets: [],
     selectorPresets: [],
     plpSelectorPresets: [],
@@ -2150,19 +2314,16 @@ async function startServer() {
     }
   }
 
-  async function resolveGroqClient(settingsOverride?: any) {
-    if (currentGroq) {
-      return currentGroq;
-    }
-
+  async function resolveAICreditsClient(settingsOverride?: any) {
     const settings = settingsOverride || await loadSettings();
-    const persistedGroq = buildGroqClient(settings?.groqApiKey);
-    if (persistedGroq) {
-      currentGroq = persistedGroq;
-      return currentGroq;
+    const persistedClient = buildAICreditsClient(settings?.aiCreditsApiKey);
+    if (persistedClient) {
+      currentAIClient = persistedClient;
+      return currentAIClient;
     }
 
-    return groq;
+    currentAIClient = aiCreditsClient;
+    return aiCreditsClient;
   }
   // Public liveness/readiness probe — no auth required, safe for platform health checks
   app.get('/api/health', (_req, res) => {
@@ -2187,11 +2348,17 @@ async function startServer() {
   });
 
   app.post('/api/auth/login', validateRequest(LoginRequestSchema), async (req, res) => {
-    const { email } = req.body;
+    const { email, accessCode } = req.body;
     const normalized = normalizeEmail(email);
+    if (!verifyInternalAccessCode(accessCode, internalAccessCode)) {
+      console.warn(`[SERVER] Failed login attempt for ${normalized} from ${req.ip}`);
+      return res.status(401).json({ error: 'Invalid email or access code.' });
+    }
+
     const user: any = await dbService.getAllowlistUser(normalized);
     if (!user) {
-      return res.status(401).json({ error: 'User is not in allowlist.' });
+      console.warn(`[SERVER] Login attempt for non-allowlisted email ${normalized} from ${req.ip}`);
+      return res.status(401).json({ error: 'Invalid email or access code.' });
     }
 
     // In production, signed sessions are mandatory.
@@ -2287,7 +2454,7 @@ async function startServer() {
     try {
       const settings = req.body;
       await dbService.saveSettings(settings);
-      currentGroq = buildGroqClient(settings.groqApiKey) || groq;
+      currentAIClient = buildAICreditsClient(settings.aiCreditsApiKey) || aiCreditsClient;
       res.json({ success: true });
     } catch (e) {
       res.status(500).json({ error: "Failed to save settings" });
@@ -2301,7 +2468,7 @@ async function startServer() {
       if (user?.role === 'admin') {
         return res.json(settings);
       }
-      return res.json({ ...settings, groqApiKey: '' });
+      return res.json({ ...settings, aiCreditsApiKey: '' });
     } catch (e) {
       res.status(500).json({ error: "Failed to read settings" });
     }
@@ -2323,6 +2490,7 @@ async function startServer() {
         userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         viewport: { width: 1920, height: 1080 }
       });
+      await installSafeRequestInterceptor(context);
       const page = await context.newPage();
 
       // Block unnecessary resources to speed up page load but allow images
@@ -2342,7 +2510,7 @@ async function startServer() {
       await delay(2000);
       
       let screenshotPath = null;
-      const safeSku = sku.replace(/[^a-z0-9_-]/gi, '_');
+      const safeSku = requireSafeStorageKey(sku);
 
       if (screenshotEnabled) {
         const screenshotFilename = `${safeSku}_screenshot.png`;
@@ -2440,7 +2608,7 @@ async function startServer() {
 
       for (const cand of sortedCandidates) {
         try {
-          const fetchRes = await fetch(cand.fullUrl);
+          const fetchRes = await fetchSafeExternal(cand.fullUrl);
           if (!fetchRes.ok) continue;
 
           const contentType = fetchRes.headers.get("content-type");
@@ -2544,7 +2712,7 @@ async function startServer() {
     try {
       await assertSafeTargetUrl(sanitizeUrl(url));
       console.log('[IMAGE RENDER] Fetching source image...');
-      const sourceResponse = await fetch(sanitizeUrl(url));
+      const sourceResponse = await fetchSafeExternal(url);
       if (!sourceResponse.ok) {
         const error = `Failed to fetch image (${sourceResponse.status})`;
         console.error('[IMAGE RENDER]', error);
@@ -2574,21 +2742,20 @@ async function startServer() {
         .jpeg({ quality: 90 })
         .toBuffer();
 
-      const safeSku = sku.toString().replace(/[^a-z0-9_-]/gi, '_');
+      const safeSku = requireSafeStorageKey(sku);
       console.log('[IMAGE RENDER] Success! Sending image...');
       res.setHeader('Content-Type', 'image/jpeg');
       res.setHeader('Content-Disposition', `attachment; filename="${safeSku}.jpg"`);
       res.send(renderedBuffer);
     } catch (error: any) {
       console.error('[IMAGE SOURCER] Render failed:', error);
-      res.status(500).json({ error: 'Failed to prepare JPG export', details: error.message });
+      res.status(error?.statusCode || 500).json({ error: 'Failed to prepare JPG export', details: error.message });
     }
   });
 
-  app.delete("/api/images/:sku", requireAuth, async (req, res) => {
+  app.delete("/api/images/:sku", requireAuth, requireAdminRole, async (req, res) => {
     try {
-      const { sku } = req.params;
-      const safeSku = sku.replace(/[^a-z0-9_-]/gi, '_');
+      const safeSku = requireSafeStorageKey(req.params.sku);
       const imagePath = path.join(IMAGES_DIR, `${safeSku}.jpg`);
       
       if (fs.existsSync(imagePath)) {
@@ -2604,7 +2771,7 @@ async function startServer() {
 
       res.json({ success: true });
     } catch (err: any) {
-      res.status(500).json({ error: "Failed to delete image", details: err.message });
+      res.status(err?.statusCode || 500).json({ error: "Failed to delete image", details: err.message });
     }
   });
 
@@ -2715,6 +2882,9 @@ async function startServer() {
     const safeUrl = sanitizeUrl(url);
     try {
       await assertSafeTargetUrl(safeUrl);
+      if (rest.secondaryTarget?.url) {
+        await assertSafeTargetUrl(sanitizeUrl(rest.secondaryTarget.url));
+      }
     } catch (e: any) {
       return res.status(400).json({
         error: { code: 'validation_failed', message: e.message, retryable: false },
@@ -2932,17 +3102,13 @@ async function startServer() {
         },
       });
     }
-    const { format } = (job.payload as { format?: string });
-    const isXlsx = format === 'xlsx';
     res.setHeader(
       'Content-Type',
-      isXlsx
-        ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        : 'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     );
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename=CMS_Upload_Master.${isXlsx ? 'xlsx' : 'xls'}`,
+      'attachment; filename=CMS_Upload_Master.xlsx',
     );
     res.send(job.result as Buffer);
   });
@@ -2952,8 +3118,18 @@ async function startServer() {
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      configFile: false,
+      server: { 
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR !== 'true'
+      },
       appType: "spa",
+      plugins: [react(), tailwindcss()],
+      resolve: {
+        alias: {
+          '@': path.resolve(__dirname, '.'),
+        },
+      },
     });
     app.use(vite.middlewares);
   } else {
