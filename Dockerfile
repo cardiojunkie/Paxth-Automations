@@ -34,10 +34,6 @@ COPY --from=build /app/src ./src
 COPY --from=build /app/public ./public
 COPY --from=build /app/settings ./settings
 COPY --from=build /app/sku-index ./sku-index
-COPY --from=build /app/firebase-applet-config.json ./firebase-applet-config.json
-COPY --from=build /app/firebase-blueprint.json ./firebase-blueprint.json
-COPY --from=build /app/firestore.rules ./firestore.rules
-COPY --from=build /app/metadata.json ./metadata.json
 COPY --from=build /app/docker/start.sh /usr/local/bin/start.sh
 
 RUN mkdir -p /app/harvest /app/jobs /app/outputs/json /app/outputs/xlsx /app/public/images \
