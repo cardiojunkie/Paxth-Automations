@@ -3,6 +3,7 @@
 FROM mcr.microsoft.com/playwright:v1.59.1-noble AS deps
 WORKDIR /app
 COPY package*.json ./
+COPY scripts/ ./scripts/
 ENV INSTALL_PLAYWRIGHT=false
 RUN npm ci
 
@@ -15,6 +16,7 @@ RUN npm run build
 FROM mcr.microsoft.com/playwright:v1.59.1-noble AS prod-deps
 WORKDIR /app
 COPY package*.json ./
+COPY scripts/ ./scripts/
 ENV INSTALL_PLAYWRIGHT=false
 RUN npm ci --omit=dev
 
