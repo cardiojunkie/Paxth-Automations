@@ -603,7 +603,7 @@ async function startServer() {
   const PORT = Number(process.env.PORT || 3000);
   const AUTH_COOKIE = 'auth_user';
   const requireSignedSessions = process.env.NODE_ENV === 'production';
-  const trustProxy = parseBooleanEnv(process.env.TRUST_PROXY, process.env.NODE_ENV === 'production');
+  const trustProxy = parseBooleanEnv(process.env.TRUST_PROXY, false);
   if (trustProxy) {
     app.set('trust proxy', 1);
   }

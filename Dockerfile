@@ -3,6 +3,7 @@
 FROM mcr.microsoft.com/playwright:v1.59.1-noble AS deps
 WORKDIR /app
 COPY package*.json ./
+ENV INSTALL_PLAYWRIGHT=false
 RUN npm ci
 
 FROM deps AS build
@@ -11,12 +12,19 @@ COPY . .
 RUN mkdir -p /app/public
 RUN npm run build
 
+FROM mcr.microsoft.com/playwright:v1.59.1-noble AS prod-deps
+WORKDIR /app
+COPY package*.json ./
+ENV INSTALL_PLAYWRIGHT=false
+RUN npm ci --omit=dev
+
 FROM mcr.microsoft.com/playwright:v1.59.1-noble AS runner
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV MAX_CONCURRENT_BROWSER_TASKS=1
 WORKDIR /app
 
-COPY --from=deps /app/node_modules ./node_modules
+COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server.ts ./server.ts
 COPY --from=build /app/src ./src
@@ -26,7 +34,6 @@ COPY --from=build /app/sku-index ./sku-index
 COPY --from=build /app/firebase-applet-config.json ./firebase-applet-config.json
 COPY --from=build /app/firebase-blueprint.json ./firebase-blueprint.json
 COPY --from=build /app/firestore.rules ./firestore.rules
-COPY --from=build /app/DRAFT_firestore.rules ./DRAFT_firestore.rules
 COPY --from=build /app/metadata.json ./metadata.json
 COPY --from=build /app/docker/start.sh /usr/local/bin/start.sh
 
@@ -36,6 +43,7 @@ RUN mkdir -p /app/harvest /app/jobs /app/outputs/json /app/outputs/xlsx /app/pub
 
 USER pwuser
 EXPOSE 3000
+VOLUME ["/app/harvest", "/app/jobs", "/app/outputs", "/app/public/images"]
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

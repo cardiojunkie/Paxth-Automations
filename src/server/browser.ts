@@ -29,10 +29,31 @@ export interface BrowserLike {
 let browser: BrowserLike | null = null;
 let browserEngine: 'cloakbrowser' | 'playwright' | null = null;
 let activeBrowserTasks = 0;
-const MAX_CONCURRENT_BROWSER_TASKS = Number(process.env.MAX_CONCURRENT_BROWSER_TASKS || 2);
+
+const parseMaxConcurrentBrowserTasks = () => {
+  const raw = Number(process.env.MAX_CONCURRENT_BROWSER_TASKS ?? '1');
+  if (!Number.isFinite(raw)) return 1;
+  const normalized = Math.floor(raw);
+  if (normalized < 1) return 1;
+  // Keep a hard cap for small VPS footprints and avoid accidental OOM.
+  return Math.min(normalized, 2);
+};
+
+const MAX_CONCURRENT_BROWSER_TASKS = parseMaxConcurrentBrowserTasks();
 
 const LAUNCH_ARGS = [
+  '--disable-dev-shm-usage',
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--single-process',
+  '--no-zygote',
+  '--disable-gpu',
+  '--disable-software-rasterizer',
   '--disable-http2', // Fix for ERR_HTTP2_PROTOCOL_ERROR on sites like Noon
+  '--disable-background-networking',
+  '--disable-background-timer-throttling',
+  '--disable-renderer-backgrounding',
+  '--disable-features=Translate,BackForwardCache,AcceptCHFrame,MediaRouter,OptimizationHints',
   '--window-size=1920,1080',
   '--disable-extensions',
   '--mute-audio',
@@ -67,8 +88,6 @@ export async function getBrowser(): Promise<BrowserLike> {
       browser = await playwrightChromium.launch({
         headless: true,
         args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
           '--disable-blink-features=AutomationControlled',
           ...LAUNCH_ARGS,
         ],

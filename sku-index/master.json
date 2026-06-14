@@ -178,6 +178,26 @@
     "product_type": "",
     "base_code": "",
     "sap_data": "",
-    "attribute_set": "Elec-M&W-Smartphones & Tablets"
+    "attribute_set": "Elec-C&A-PCACC-PC Headsets & Speakers"
+  },
+  {
+    "sku": "3",
+    "brand": "3",
+    "ean": "3",
+    "shipping_weight": "3",
+    "product_type": "3",
+    "base_code": "3",
+    "sap_data": "q",
+    "attribute_set": "Elec-Audio-Radio"
+  },
+  {
+    "sku": "131",
+    "brand": "HP",
+    "ean": "2342352435245",
+    "shipping_weight": "3000",
+    "product_type": "Laptop",
+    "base_code": "131",
+    "sap_data": "",
+    "attribute_set": "Elec-C&A-Laptops"
   }
 ]
