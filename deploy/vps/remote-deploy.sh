@@ -30,6 +30,11 @@ echo "[1/6] Build image"
 docker compose build --no-cache
 
 echo "[2/6] Start app"
+if docker ps -a --format '{{.Names}}' | grep -qx 'moosstudio-app' \
+  && ! docker compose ps --services --all | grep -qx 'app'; then
+  echo "Removing stale moosstudio-app container not owned by this compose project"
+  docker rm -f moosstudio-app
+fi
 docker compose up -d
 
 echo "[3/6] Install nginx site config"
