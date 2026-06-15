@@ -23,7 +23,7 @@ services:
       - /opt/moosstudio/images:/app/public/images
       - /opt/moosstudio/sku-index:/app/sku-index
       - /opt/moosstudio/settings:/app/settings
-      - /opt/moosstudio/settings/firebase-applet-config.json:/app/firebase-applet-config.json
+      - /opt/moosstudio/firebase-applet-config.json:/app/firebase-applet-config.json
       - /opt/moosstudio/firebase-service-account.json:/app/firebase-service-account.json
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
