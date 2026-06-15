@@ -331,6 +331,7 @@ export default function App() {
     description: "", 
     keywords: "",
     aiCreditsApiKey: "",
+    globalMappingLogic: "",
     attributeSets: [] as {name: string, fields: string[], mdRules?: string, mdFileName?: string}[],
     selectorPresets: [] as {name: string, selector: string, strategy: string}[],
     plpSelectorPresets: [] as {name: string, selector: string}[]
@@ -3081,6 +3082,46 @@ export default function App() {
                                              </div>
                                           </div>
                                        </div>
+                                    </section>
+
+                                    <section className="space-y-6">
+                                      <div className="flex items-center gap-4">
+                                        <div className="w-14 h-14 bg-purple-600/10 border border-purple-500/20 rounded-2xl flex items-center justify-center shadow-inner">
+                                          <Network className="w-7 h-7 text-purple-400" />
+                                        </div>
+                                        <div>
+                                          <h3 className="text-xl font-bold text-white leading-none">Global Mapping Logic</h3>
+                                          <p className="text-[10px] text-white/30 uppercase tracking-widest mt-2">Default Rule Layer</p>
+                                        </div>
+                                      </div>
+                                      <div className="bg-[#0a0a0a] border border-white/5 rounded-3xl p-8 shadow-2xl space-y-4">
+                                        <div className="flex items-center justify-between gap-3">
+                                          <span className="text-[9px] text-white/40 font-bold uppercase tracking-widest">Rule Characters</span>
+                                          <span className="text-[9px] text-purple-300/70 font-mono">
+                                            {(appSettings.globalMappingLogic || '').length}
+                                          </span>
+                                        </div>
+                                        <textarea
+                                          value={appSettings.globalMappingLogic || ''}
+                                          onChange={(e) => setAppSettings({ ...appSettings, globalMappingLogic: e.target.value })}
+                                          className="w-full min-h-48 bg-black/60 border border-white/10 rounded-2xl px-5 py-4 text-xs text-white/80 font-mono leading-relaxed resize-y outline-none focus:border-purple-500/50 custom-scrollbar"
+                                          placeholder="Global mapping rules..."
+                                        />
+                                        <div className="flex items-center justify-between gap-4">
+                                          <p className="text-[10px] text-white/35 leading-relaxed">
+                                            {isAdmin
+                                              ? 'Saved rules apply before schema-specific mapping instructions.'
+                                              : 'Admin role required to edit global rules.'}
+                                          </p>
+                                          <button
+                                            onClick={() => persistSettings(appSettings)}
+                                            disabled={isSavingSettings || !isAdmin}
+                                            className="px-6 py-3 bg-purple-600 hover:bg-purple-500 disabled:bg-purple-600/30 disabled:text-white/40 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border border-purple-500/20 shadow-xl"
+                                          >
+                                            {isSavingSettings ? 'Saving...' : 'Save Rules'}
+                                          </button>
+                                        </div>
+                                      </div>
                                     </section>
 
                                     <section className="space-y-6">

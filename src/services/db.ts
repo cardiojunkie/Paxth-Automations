@@ -117,6 +117,7 @@ const SKU_INDEX_DIR = path.join(process.cwd(), 'sku-index');
 const HARVEST_DIR = path.join(process.cwd(), 'harvest');
 const OUTPUTS_DIR = path.join(process.cwd(), 'outputs');
 const SETTINGS_DIR = path.join(process.cwd(), 'settings');
+const BUNDLED_SETTINGS_PATH = path.join(process.cwd(), 'src', 'server', 'default-app-settings.json');
 
 [SKU_INDEX_DIR, HARVEST_DIR, OUTPUTS_DIR, SETTINGS_DIR].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -170,6 +171,45 @@ const readJsonFile = <T>(filePath: string, fallback: T): T => {
 
 const isNonEmptyObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length > 0;
+
+const hasSettingsContent = (settings: unknown): settings is Record<string, unknown> => {
+  if (!isNonEmptyObject(settings)) return false;
+  const value = settings as any;
+  return (
+    (Array.isArray(value.attributeSets) && value.attributeSets.length > 0) ||
+    (Array.isArray(value.selectorPresets) && value.selectorPresets.length > 0) ||
+    (Array.isArray(value.plpSelectorPresets) && value.plpSelectorPresets.length > 0) ||
+    (typeof value.globalMappingLogic === 'string' && value.globalMappingLogic.trim().length > 0)
+  );
+};
+
+const mergeSettingsWithDefaults = (settings: any, defaults: any) => {
+  const merged = {
+    ...(isNonEmptyObject(defaults) ? defaults : {}),
+    ...(isNonEmptyObject(settings) ? settings : {}),
+  };
+
+  for (const key of ['attributeSets', 'selectorPresets', 'plpSelectorPresets']) {
+    if (!Array.isArray(merged[key]) || merged[key].length === 0) {
+      merged[key] = Array.isArray(defaults?.[key]) ? defaults[key] : [];
+    }
+  }
+
+  if (typeof merged.globalMappingLogic !== 'string' || merged.globalMappingLogic.trim().length === 0) {
+    merged.globalMappingLogic = typeof defaults?.globalMappingLogic === 'string' ? defaults.globalMappingLogic : '';
+  }
+
+  return merged;
+};
+
+const readSettingsWithBundledFallback = () => {
+  const bundledSettings = readJsonFile(BUNDLED_SETTINGS_PATH, {});
+  const runtimeSettings = readJsonFile(path.join(SETTINGS_DIR, 'app_settings.json'), {});
+  return mergeSettingsWithDefaults(
+    hasSettingsContent(runtimeSettings) ? runtimeSettings : {},
+    bundledSettings
+  );
+};
 
 const normalizeHarvestFilename = (filename: string) => {
   const safeName = path.basename(filename).replace(/[^a-z0-9._-]/gi, '_');
@@ -789,22 +829,22 @@ export const dbService = {
 
   // Settings
   async getSettings() {
+    const fallbackSettings = readSettingsWithBundledFallback();
     if (db && canUseFirestore('settings')) {
       try {
         const docSnap = await db.collection('settings').doc('app_settings').get();
         if (docSnap.exists) {
           const remoteSettings = docSnap.data()?.data;
-          if (isNonEmptyObject(remoteSettings)) {
-            return remoteSettings;
+          if (hasSettingsContent(remoteSettings)) {
+            return mergeSettingsWithDefaults(remoteSettings, fallbackSettings);
           }
-          console.warn('[Firestore] app_settings is empty. Falling back to settings/app_settings.json.');
+          console.warn('[Firestore] app_settings has no schemas/selectors/global mapping logic. Falling back to bundled defaults.');
         }
       } catch (e: any) {
         // ignore
       }
     }
-    const fp = path.join(SETTINGS_DIR, 'app_settings.json');
-    return readJsonFile(fp, {});
+    return fallbackSettings;
   },
   async saveSettings(settings: any) {
     if (db && canUseFirestore('settings')) {

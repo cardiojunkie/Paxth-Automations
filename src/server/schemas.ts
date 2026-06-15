@@ -41,10 +41,29 @@ export const SKUIndexRequestSchema = z.object({
 });
 
 export const SettingsRequestSchema = z.object({
+  title: z.string().optional(),
+  bullets: z.string().optional(),
+  description: z.string().optional(),
+  keywords: z.string().optional(),
   aiCreditsApiKey: z.string().optional(),
-  schemas: z.record(z.any()).optional(),
-  selectors: z.record(z.any()).optional(),
-});
+  globalMappingLogic: z.string().optional(),
+  attributeSets: z.array(z.object({
+    name: z.string(),
+    fields: z.array(z.string()),
+    mdRules: z.string().optional(),
+    mdFileName: z.string().optional(),
+  })).optional(),
+  selectorPresets: z.array(z.object({
+    name: z.string(),
+    selector: z.string(),
+    strategy: z.string(),
+  })).optional(),
+  plpSelectorPresets: z.array(z.object({
+    name: z.string(),
+    selector: z.string(),
+  })).optional(),
+  // Allow any additional fields for forward compatibility
+}).passthrough();
 
 export const LoginRequestSchema = z.object({
   email: z.string().email('Valid email is required'),

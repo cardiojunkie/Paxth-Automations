@@ -107,6 +107,7 @@ interface ServerSettings {
   description: string;
   keywords: string;
   aiCreditsApiKey: string;
+  globalMappingLogic?: string;
   attributeSets: AttributeSetConfig[];
   selectorPresets: Array<{ name: string; selector: string; strategy: string }>;
   plpSelectorPresets: Array<{ name: string; selector: string }>;
@@ -2457,6 +2458,7 @@ async function startServer() {
     description: '',
     keywords: '',
     aiCreditsApiKey: '',
+    globalMappingLogic: '',
     attributeSets: [],
     selectorPresets: [],
     plpSelectorPresets: [],

@@ -67,6 +67,7 @@ export interface AppSettings {
   description: string;
   keywords: string;
   aiCreditsApiKey: string;
+  globalMappingLogic: string;
   attributeSets: AttributeSet[];
   selectorPresets: SelectorPreset[];
   plpSelectorPresets: PlpPreset[];
