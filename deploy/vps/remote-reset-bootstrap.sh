@@ -38,12 +38,12 @@ rm -rf "$APP_ROOT"
 mkdir -p "$APP_ROOT"
 
 echo "[4/8] Recreate persistent folders"
-mkdir -p "$APP_ROOT/deploy/vps/data/harvest"
-mkdir -p "$APP_ROOT/deploy/vps/data/jobs"
-mkdir -p "$APP_ROOT/deploy/vps/data/outputs"
-mkdir -p "$APP_ROOT/deploy/vps/data/images"
-mkdir -p "$APP_ROOT/deploy/vps/data/sku-index"
-mkdir -p "$APP_ROOT/deploy/vps/data/settings"
+mkdir -p "$APP_ROOT/harvest"
+mkdir -p "$APP_ROOT/jobs"
+mkdir -p "$APP_ROOT/outputs"
+mkdir -p "$APP_ROOT/images"
+mkdir -p "$APP_ROOT/sku-index"
+mkdir -p "$APP_ROOT/settings"
 
 echo "[5/8] Ensure 2GB swap exists"
 if ! swapon --show | grep -q "$SWAPFILE"; then
@@ -60,6 +60,7 @@ fi
 
 echo "[6/8] Firewall baseline"
 ufw allow OpenSSH
+ufw allow 20018/tcp
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw --force enable
@@ -73,4 +74,4 @@ if [ ! -f "$APP_ROOT/deploy/vps/nginx-moosstudio.conf" ]; then
 fi
 
 echo "[8/8] Bootstrap complete"
-echo "Next: upload fresh code to $APP_ROOT, create $APP_ROOT/deploy/vps/.env.prod, then run remote-deploy.sh"
+echo "Next: upload fresh code to $APP_ROOT, create $APP_ROOT/.env and $APP_ROOT/settings/allowlist.json, then run remote-deploy.sh"

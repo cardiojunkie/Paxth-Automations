@@ -53,11 +53,11 @@ chmod +x remote-reset-bootstrap.sh remote-deploy.sh
 ## 4) Create production env and allowlist
 
 ```bash
-cd /opt/moosstudio/deploy/vps
-cp .env.prod.example .env.prod
+cp /opt/moosstudio/deploy/vps/.env.prod.example /opt/moosstudio/.env
+chmod 600 /opt/moosstudio/.env
 ```
 
-Edit `.env.prod` with real secrets:
+Edit `/opt/moosstudio/.env` with real secrets:
 
 - `AI_CREDITS_API_KEY`
 - `SESSION_SECRET` (32+ chars)
@@ -67,10 +67,11 @@ Edit `.env.prod` with real secrets:
 Create allowlist with your admin email:
 
 ```bash
-cat > /opt/moosstudio/deploy/vps/data/settings/allowlist.json << 'EOF'
+mkdir -p /opt/moosstudio/settings
+cat > /opt/moosstudio/settings/allowlist.json << 'EOF'
 [
   {
-    "email": "you@example.com",
+    "email": "aswathmantle@gmail.com",
     "role": "admin",
     "addedAt": "2026-06-14T00:00:00Z"
   }
@@ -119,3 +120,7 @@ cd /opt/moosstudio/deploy/vps
 docker compose build --no-cache
 docker compose up -d
 ```
+
+The deploy script also installs `moosstudio-watchdog.timer`, which checks
+`http://127.0.0.1:3000/api/health` every minute and restarts the app container
+if the health endpoint stops responding.
