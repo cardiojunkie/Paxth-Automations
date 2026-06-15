@@ -1,1 +1,3 @@
 *.sh text eol=lf
+deploy/vps/*.conf text eol=lf
+deploy/vps/docker-compose.yml text eol=lf

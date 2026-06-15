@@ -15,7 +15,7 @@ services:
       PORT: 3000
       MAX_CONCURRENT_BROWSER_TASKS: 1
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
       - /opt/moosstudio/harvest:/app/harvest
       - /opt/moosstudio/jobs:/app/jobs
