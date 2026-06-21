@@ -55,7 +55,7 @@ const __dirname = path.dirname(__filename);
 
 import fs from "fs";
 import { dbService } from "./src/services/db.js";
-import * as ExcelJS from "exceljs";
+import ExcelJS from "exceljs";
 import sharp from "sharp";
 
 // Initialization handled by dbService
@@ -125,7 +125,8 @@ async function buildXlsxBuffer(rows: any[], headers: string[]): Promise<Buffer> 
   rows.forEach((row) => {
     const normalizedRow: Record<string, unknown> = {};
     headers.forEach((header) => {
-      normalizedRow[header] = row?.[header] ?? '';
+      const value = row?.[header];
+      normalizedRow[header] = value == null || typeof value !== 'object' ? (value ?? '') : JSON.stringify(value);
     });
     worksheet.addRow(normalizedRow);
   });
@@ -2445,9 +2446,9 @@ async function startServer() {
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', 'attachment; filename=CMS_Upload_Master.xlsx');
       res.send(buf);
-    } catch (e) {
+    } catch (e: any) {
       console.error('Error generating report:', e);
-      res.status(500).json({ error: "Failed to generate report" });
+      res.status(500).json({ error: "Failed to generate report", details: e?.message });
     }
   });
 

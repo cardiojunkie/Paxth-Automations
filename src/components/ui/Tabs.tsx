@@ -27,7 +27,7 @@ export function Tabs<T extends string = string>({ items, value, onChange, classN
   };
 
   return (
-    <div role="tablist" aria-label={ariaLabel} className={['inline-flex rounded-lg border border-white/10 bg-white/5 p-1', className].join(' ')}>
+    <div role="tablist" aria-label={ariaLabel} className={['inline-flex rounded-lg border border-stone-200 bg-stone-100 p-1', className].join(' ')}>
       {items.map((item, index) => (
         <button
           key={item.id}
@@ -38,9 +38,9 @@ export function Tabs<T extends string = string>({ items, value, onChange, classN
           onClick={() => onChange(item.id)}
           onKeyDown={(event) => handleKeyDown(event, index)}
           className={[
-            'rounded-md px-3 py-1.5 text-[11px] font-bold uppercase tracking-wider transition-colors',
-            'focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:ring-offset-2 focus:ring-offset-zinc-950',
-            value === item.id ? 'bg-blue-600 text-white shadow-lg shadow-blue-950/30' : 'text-white/45 hover:text-white',
+            'rounded-md px-3 py-1.5 text-sm font-medium transition-colors',
+            'focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:ring-offset-2 focus:ring-offset-brand-bg',
+            value === item.id ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-900',
           ].join(' ')}
         >
           {item.label}

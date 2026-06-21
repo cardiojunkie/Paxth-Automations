@@ -12,13 +12,13 @@ export function EmptyState({ icon, title, description, action, className = '' }:
   return (
     <div
       className={[
-        'flex min-h-48 flex-col items-center justify-center rounded-lg border border-dashed border-white/10 p-8 text-center',
+        'flex min-h-48 flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 bg-stone-50/70 p-8 text-center',
         className,
       ].join(' ')}
     >
-      {icon ? <div className="mb-4 text-white/25">{icon}</div> : null}
-      <h3 className="text-sm font-semibold text-white/80">{title}</h3>
-      {description ? <p className="mt-2 max-w-sm text-xs leading-relaxed text-white/40">{description}</p> : null}
+      {icon ? <div className="mb-4 text-slate-400">{icon}</div> : null}
+      <h3 className="text-sm font-semibold text-slate-900">{title}</h3>
+      {description ? <p className="mt-2 max-w-sm text-sm leading-relaxed text-slate-500">{description}</p> : null}
       {action ? <div className="mt-5">{action}</div> : null}
     </div>
   );

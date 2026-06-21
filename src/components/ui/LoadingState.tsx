@@ -8,8 +8,8 @@ export interface LoadingStateProps {
 
 export function LoadingState({ label = 'Loading', className = '' }: LoadingStateProps) {
   return (
-    <div className={['flex items-center justify-center gap-3 text-sm text-white/55', className].join(' ')}>
-      <Loader2 className="h-4 w-4 animate-spin text-blue-400" />
+    <div className={['flex items-center justify-center gap-3 text-sm text-slate-600', className].join(' ')}>
+      <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
       <span>{label}</span>
     </div>
   );

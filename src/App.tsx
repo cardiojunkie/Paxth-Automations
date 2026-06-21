@@ -36,6 +36,26 @@ interface AuthUser {
   role: 'admin' | 'user';
 }
 
+const AUTH_USER_STORAGE_KEY = 'paxth.authUser';
+
+const readCachedAuthUser = (): AuthUser | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.sessionStorage.getItem(AUTH_USER_STORAGE_KEY);
+    if (!raw) return null;
+    const user = JSON.parse(raw);
+    return typeof user?.email === 'string' && (user.role === 'admin' || user.role === 'user') ? user : null;
+  } catch {
+    return null;
+  }
+};
+
+const cacheAuthUser = (user: AuthUser | null) => {
+  if (typeof window === 'undefined') return;
+  if (user) window.sessionStorage.setItem(AUTH_USER_STORAGE_KEY, JSON.stringify(user));
+  else window.sessionStorage.removeItem(AUTH_USER_STORAGE_KEY);
+};
+
 interface AllowlistUser {
   email: string;
   role: 'admin' | 'user';
@@ -62,7 +82,7 @@ interface HarvestEditorEntry {
   openedAt: string;
 }
 
-type ModuleId = 'sku-indexer' | 'scrapper' | 'jobs' | 'images' | 'settings';
+type ModuleId = 'upload' | 'pre-qa' | 'scrapper' | 'jobs' | 'review' | 'images' | 'settings';
 type SettingsSubModuleId = 'api' | 'mapping' | 'indexer';
 
 const SCRAPE_JOB_POLL_TIMEOUT_MS = 600_000;
@@ -185,8 +205,11 @@ async function downloadXlsxTemplate(filename: string, sheetName: string, headers
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
+  link.style.display = 'none';
+  document.body.appendChild(link);
   link.click();
-  URL.revokeObjectURL(url);
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 const HARVEST_IMAGE_SECTION_HEADINGS = new Set([
   '### MEDIA SOURCE ASSETS (PLAINTEXT URLs):',
@@ -318,10 +341,12 @@ export default function App() {
     { name: "Standard Product List", selector: ".product-item a, .product-card a" }
   ];
 
-  const [currentModule, setCurrentModule] = useState<ModuleId>('scrapper');
+  const [currentModule, setCurrentModule] = useState<ModuleId>('upload');
+  const [reviewSku, setReviewSku] = useState<string>('');
   const [settingsSubModule, setSettingsSubModule] = useState<SettingsSubModuleId>('api');
   const [editingGenerator, setEditingGenerator] = useState<string | null>(null);
   const [editingSetRules, setEditingSetRules] = useState<number | null>(null);
+  const [expandedSchemaIdx, setExpandedSchemaIdx] = useState<number | null>(null);
   const [skuIndex, setSkuIndex] = useState<SkuRecord[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [harvestFiles, setHarvestFiles] = useState<HarvestFile[]>([]);
@@ -336,7 +361,7 @@ export default function App() {
     selectorPresets: [] as {name: string, selector: string, strategy: string}[],
     plpSelectorPresets: [] as {name: string, selector: string}[]
   });
-  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(() => readCachedAuthUser());
   const [isAuthChecking, setIsAuthChecking] = useState(true);
   const [loginEmail, setLoginEmail] = useState('');
   const [loginAccessCode, setLoginAccessCode] = useState('');
@@ -519,6 +544,8 @@ export default function App() {
   const [harvestSaveError, setHarvestSaveError] = useState<string | null>(null);
   const [loadingHarvestFile, setLoadingHarvestFile] = useState(false);
   const [selectedJobs, setSelectedJobs] = useState<string[]>([]);
+  const [isExportingOutputs, setIsExportingOutputs] = useState(false);
+  const [outputExportError, setOutputExportError] = useState<string | null>(null);
   const [selectedSkuIndexItems, setSelectedSkuIndexItems] = useState<string[]>([]);
   const [jobAiModels, setJobAiModels] = useState<{[sku:string]: string}>({});
   const [customJobAiModels, setCustomJobAiModels] = useState<{[sku:string]: string}>({});
@@ -578,6 +605,7 @@ export default function App() {
       const payload = await res.json().catch(() => null);
       if (payload?.user) {
         setAuthUser(payload.user);
+        cacheAuthUser(payload.user);
       }
       setCsrfToken(payload?.csrfToken || null);
       await hydrateCoreData();
@@ -615,6 +643,7 @@ export default function App() {
     }
     setCsrfToken(null);
     setAuthUser(null);
+    cacheAuthUser(null);
     setAllowlistUsers([]);
     addLog('system', 'Session ended.');
   };
@@ -845,16 +874,19 @@ export default function App() {
         if (res.ok) {
           const payload = await res.json();
           setAuthUser(payload.user || null);
+          cacheAuthUser(payload.user || null);
           setCsrfToken(payload?.csrfToken || null);
           await hydrateCoreData();
         } else {
           setCsrfToken(null);
           setAuthUser(null);
+          cacheAuthUser(null);
         }
       } catch {
         if (mounted) {
           setCsrfToken(null);
           setAuthUser(null);
+          cacheAuthUser(null);
         }
       } finally {
         if (mounted) setIsAuthChecking(false);
@@ -1165,11 +1197,21 @@ export default function App() {
 
   const handleDownloadSkuTemplate = async () => {
     const headers = ['sku', 'base_code', 'brand', 'attributes__lulu_ean', 'attributes__shipping_weight', 'attributes__lulu_product_type', 'sap_data', 'attribute_set'];
-    await downloadXlsxTemplate('sku_index_template.xlsx', 'SKU Template', headers);
+    try {
+      await downloadXlsxTemplate('sku_index_template.xlsx', 'SKU Template', headers);
+      addLog('success', 'SKU template download started.');
+    } catch (error: any) {
+      addLog('error', error?.message || 'Failed to download SKU template.');
+    }
   };
 
   const handleDownloadBatchTemplate = async () => {
-    await downloadXlsxTemplate('batch_manifest_template.xlsx', 'Batch Manifest', BATCH_TEMPLATE_HEADERS);
+    try {
+      await downloadXlsxTemplate('batch_manifest_template.xlsx', 'Batch Manifest', BATCH_TEMPLATE_HEADERS);
+      addLog('success', 'Batch template download started.');
+    } catch (error: any) {
+      addLog('error', error?.message || 'Failed to download batch template.');
+    }
   };
 
   const handleSkuDelete = async (sku: string) => {
@@ -1339,6 +1381,40 @@ export default function App() {
       }
     } catch (e) {
       addLog('error', 'Failed to fetch output data.');
+    }
+  };
+
+  const handleExportOutputs = async () => {
+    setIsExportingOutputs(true);
+    setOutputExportError(null);
+    try {
+      const params = new URLSearchParams();
+      if (selectedJobs.length > 0) params.set('skus', selectedJobs.join(','));
+      const res = await apiFetch(`/api/outputs/xlsx${params.toString() ? `?${params}` : ''}`);
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        throw new Error(payload?.details || payload?.error || 'Failed to generate XLSX export.');
+      }
+
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const filename = disposition.match(/filename="?([^"]+)"?/i)?.[1] || 'CMS_Upload_Master.xlsx';
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename.endsWith('.xlsx') ? filename : `${filename}.xlsx`;
+      link.style.display = 'none';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      addLog('success', `XLSX export started${selectedJobs.length > 0 ? ` for ${selectedJobs.length} selected SKU(s)` : ''}.`);
+    } catch (error: any) {
+      const message = error?.message || 'Failed to export XLSX.';
+      setOutputExportError(message);
+      addLog('error', message);
+    } finally {
+      setIsExportingOutputs(false);
     }
   };
 
@@ -1859,19 +1935,64 @@ export default function App() {
     }
   };
 
+  const skuRecords = skuIndex as Record<string, any>[];
+  const harvestSkuSet = new Set(harvestFiles.map((file: any) => deriveHarvestSku(file.name).toLowerCase()));
+  const uploadedAttributeFields = new Set<string>();
+  skuRecords.forEach((record) => {
+    Object.keys(record || {}).forEach((key) => {
+      if (key.toLowerCase().startsWith('attributes__')) uploadedAttributeFields.add(key);
+    });
+  });
+  const hasSapSource = (record: Record<string, any>) => Boolean(record.sap_data || record.source__sap || record.source_sap);
+  const hasUrlSource = (record: Record<string, any>) => Boolean(record.source__url || record.source_url || record.url);
+  const hasHarvestSource = (record: Record<string, any>) => {
+    const rawSku = (record.sku || record.SKU || '').toString();
+    return rawSku ? harvestSkuSet.has(rawSku.replace(/[^a-z0-9_-]/gi, '_').toLowerCase()) : false;
+  };
+  const uploadedSkuCount = skuRecords.length;
+  const sapSourceCount = skuRecords.filter(hasSapSource).length;
+  const urlSourceCount = skuRecords.filter(hasUrlSource).length;
+  const pdfSourceCount = skuRecords.filter((record) => Boolean(record.pdf_text)).length;
+  const harvestSourceCount = skuRecords.filter(hasHarvestSource).length;
+  const sourceReadyCount = skuRecords.filter((record) => hasSapSource(record) || record.pdf_text || hasHarvestSource(record)).length;
+  const missingSourceCount = Math.max(uploadedSkuCount - sourceReadyCount, 0);
+  const completedJobCount = jobs.filter((job) => job.status === 'completed').length;
+  const failedJobCount = jobs.filter((job) => job.status === 'failed').length;
+  const pendingJobCount = jobs.filter((job) => job.status === 'pending').length;
+  const inProgressJobCount = jobs.filter((job) => job.status === 'queued' || job.status === 'running').length;
+  const readyMappingJobCount = jobs.filter((job) => job.status === 'ready').length;
+  const selectedReviewJob = jobs.find((job) => job.sku === reviewSku) || jobs[0] || null;
+  const selectedReviewRecord = selectedReviewJob
+    ? skuRecords.find((record) => ((record.sku || record.SKU || '') as string).toString().toLowerCase() === selectedReviewJob.sku.toLowerCase()) || null
+    : null;
+  const selectedReviewLogs = selectedReviewJob
+    ? logs.filter((log) => log.message.toLowerCase().includes(selectedReviewJob.sku.toLowerCase())).slice(-8)
+    : [];
+  const uploadLatestSuccess = [...logs].reverse().find((log) =>
+    log.type === 'success' && /SKU Indexer synced|SKU .* inserted/i.test(log.message)
+  );
+  const uploadLatestError = [...logs].reverse().find((log) =>
+    log.type === 'error' && /SKU Index|Excel|Upload|manifest/i.test(log.message)
+  );
+  const workflowSteps = ['Upload', 'Pre-QA', 'QA Jobs', 'SKU Review', 'Sources', 'Settings'];
+
   const moduleNavItems: AppShellNavItem<ModuleId>[] = [
-    { id: 'scrapper', label: 'Data Harvest', description: 'Scrape and capture', icon: Cpu },
-    { id: 'sku-indexer', label: 'SKU Indexer', description: 'Master catalogue', icon: Database },
-    { id: 'jobs', label: 'AI Jobs', description: 'Mapping queue', icon: Briefcase },
-    { id: 'images', label: 'Image Sourcer', description: 'Extract assets', icon: ImageIcon },
+    { id: 'upload', label: 'Upload', description: 'Import catalogue data', icon: Upload },
+    { id: 'pre-qa', label: 'Pre-QA', description: 'Readiness checks', icon: Check },
+    { id: 'scrapper', label: 'Data Harvest', description: 'Scrape and archive', icon: Cpu },
+    { id: 'jobs', label: 'QA Jobs', description: 'Mapping queue', icon: Briefcase },
+    { id: 'review', label: 'SKU Review', description: 'Inspect sources', icon: List },
+    { id: 'images', label: 'Sources', description: 'Images and archives', icon: ImageIcon },
     { id: 'settings', label: 'Settings', description: 'System controls', icon: Settings },
   ];
 
   const moduleMeta: Record<ModuleId, { title: string; subtitle: string }> = {
+    upload: { title: 'Upload Catalogue', subtitle: 'Import SKU, attribute, and source data before QA.' },
+    'pre-qa': { title: 'Pre-QA Readiness', subtitle: 'Check source coverage and job readiness before running AI QA.' },
     scrapper: { title: 'Data Harvest', subtitle: 'Capture product content, discovery targets, and markdown harvest files.' },
-    'sku-indexer': { title: 'SKU Indexer', subtitle: 'Manage the master product catalogue used by jobs and exports.' },
-    jobs: { title: 'AI Mapping Jobs', subtitle: 'Dispatch mapping jobs and review generated catalogue outputs.' },
-    images: { title: 'Image Sourcer', subtitle: 'Extract, inspect, and prepare product image assets.' },
+    jobs: { title: 'QA Jobs', subtitle: 'Dispatch mapping jobs and review generated catalogue outputs.' },
+    review: { title: 'SKU Review', subtitle: 'Inspect SKU data, source context, timelines, and outputs.' },
+    images: { title: 'Sources', subtitle: 'Manage harvest files, source images, and export selected assets.' },
     settings: { title: 'Settings', subtitle: 'Configure connectivity, mapping logic, and schema governance.' },
   };
 
@@ -1935,8 +2056,8 @@ export default function App() {
               <div className="h-10 w-16 rounded-lg border border-white/10 bg-black overflow-hidden">
                 <img src="/logoq.png" alt="paxth logo" className="h-full w-full object-contain" />
               </div>
-              <h1 className="text-2xl font-black tracking-tight text-white">Paxth Automation Solution</h1>
-              <p className="text-sm text-white/45">Sign in with an approved email and internal access code.</p>
+              <h1 className="text-2xl font-black tracking-tight text-slate-950">Paxth Automation Solution</h1>
+              <p className="text-sm text-slate-600">Sign in with an approved email and internal access code.</p>
             </div>
             <div className="space-y-4">
               <Input
@@ -1989,7 +2110,7 @@ export default function App() {
       <main className="flex flex-1 min-h-0 overflow-hidden max-lg:flex-col">
 
         {/* SECONDARY PANEL: CONFIGURATION */}
-        <aside id="config-panel" className="w-80 border-r border-white/10 flex flex-col bg-zinc-950/55 shrink-0 max-lg:w-full max-lg:max-h-[44vh] max-lg:border-r-0 max-lg:border-b">
+        <aside id="config-panel" className="w-80 shrink-0 border-r border-stone-200 bg-stone-50/70 flex flex-col max-lg:w-full max-lg:max-h-[44vh] max-lg:border-r-0 max-lg:border-b">
           {currentModule === 'scrapper' && (
             <>
               {/* MODE SELECTOR */}
@@ -2690,28 +2811,36 @@ export default function App() {
         )}
 
 
-          {currentModule === 'sku-indexer' && (
+          {currentModule === 'upload' && (
             <div className="space-y-6">
-              <div className="flex items-center justify-between">
-                <label className="text-[10px] uppercase tracking-widest text-white/40 font-bold block">Master Indexer</label>
+              <div className="space-y-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-950">Catalogue import</p>
+                  <p className="text-xs text-slate-500">Upload the master SKU file or add one SKU manually.</p>
+                </div>
                 <Tabs
                   items={[
-                    { id: 'upload', label: 'Bulk Upload' },
-                    { id: 'manual', label: 'Manual Entry' },
+                    { id: 'upload', label: 'Excel upload' },
+                    { id: 'manual', label: 'Manual SKU' },
                   ]}
                   value={indexerMode}
                   onChange={(value) => setIndexerMode(value as 'upload' | 'manual')}
                   ariaLabel="SKU indexer mode"
+                  className="grid w-full grid-cols-2"
                 />
               </div>
 
               {indexerMode === 'upload' ? (
-                <div className="space-y-2">
-                  <div className="upload-zone group">
+                <div className="space-y-4">
+                  <div className="upload-zone group min-h-44">
                     <input type="file" onChange={handleSkuUpload} accept=".xlsx" aria-label="Upload SKU master index XLSX" className="absolute inset-0 opacity-0 cursor-pointer" />
-                    <Database className="w-6 h-6 text-blue-400 group-hover:scale-110 transition-transform" />
-                    <div className="text-[10px] font-bold text-white/80 uppercase">UPLOAD Master Index (.xlsx)</div>
-                    <div className="text-[10px] text-white/35">Expected columns match the downloadable template.</div>
+                    <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-blue-700">
+                      <FileSpreadsheet className="h-6 w-6" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-semibold text-slate-950">Upload master index</div>
+                      <div className="mt-1 text-xs text-slate-500">Drop or choose an `.xlsx` file. Existing SKUs are merged by SKU.</div>
+                    </div>
                   </div>
                   <Select
                     label="Apply Attribute Set"
@@ -2731,79 +2860,105 @@ export default function App() {
                     size="sm"
                     className="w-full"
                   >
-                    ↓ Download Template
+                    Download SKU template
                   </Button>
+                  <div className="rounded-lg border border-stone-200 bg-white p-4">
+                    <p className="text-sm font-semibold text-slate-950">Expected workbook fields</p>
+                    <div className="mt-3 grid gap-2 text-xs text-slate-600">
+                      <div className="flex items-start gap-2"><Check className="mt-0.5 h-3.5 w-3.5 text-emerald-600" />SKU identifiers: `sku`, `base_code`, brand, EAN.</div>
+                      <div className="flex items-start gap-2"><Check className="mt-0.5 h-3.5 w-3.5 text-emerald-600" />Attribute columns: headers starting with `attributes__`.</div>
+                      <div className="flex items-start gap-2"><Check className="mt-0.5 h-3.5 w-3.5 text-emerald-600" />SAP truth source: current storage uses `sap_data`.</div>
+                      <div className="flex items-start gap-2"><Check className="mt-0.5 h-3.5 w-3.5 text-emerald-600" />Optional source fields: `source__url`, PDF context, or scraped harvest later.</div>
+                    </div>
+                  </div>
+                  <div className="rounded-lg border border-stone-200 bg-stone-50 p-4">
+                    <p className="text-sm font-semibold text-slate-950">Batch source URLs</p>
+                    <p className="mt-1 text-xs text-slate-500">Optional manifest for scraping product pages. Required columns are `sku` and `url`.</p>
+                    <div className="mt-3 grid gap-2">
+                      <label className="relative flex cursor-pointer items-center justify-between rounded-lg border border-dashed border-stone-300 bg-white px-3 py-2 text-sm text-slate-700 hover:border-blue-400 hover:bg-blue-50">
+                        <span>{batchFile ? batchFile.name : 'Choose batch manifest'}</span>
+                        <Upload className="h-4 w-4 text-slate-400" />
+                        <input type="file" onChange={handleBatchUpload} accept=".xlsx" aria-label="Upload batch manifest XLSX" className="absolute inset-0 opacity-0 cursor-pointer" />
+                      </label>
+                      <Button onClick={handleDownloadBatchTemplate} variant="secondary" size="sm" className="w-full">
+                        Download batch template
+                      </Button>
+                      {batchData.length > 0 ? (
+                        <Alert tone="success" className="text-xs">{batchData.length} URL rows loaded for scraping.</Alert>
+                      ) : null}
+                    </div>
+                  </div>
                 </div>
               ) : (
-                <div className="space-y-3 bg-white/5 p-4 rounded-xl border border-white/10">
+                <div className="space-y-3 rounded-lg border border-stone-200 bg-white p-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="space-y-1">
-                      <label className="text-[9px] uppercase text-white/40 font-bold">SKU *</label>
+                      <label className="text-xs font-medium text-slate-700">SKU *</label>
                       <input 
                         type="text" 
                         value={manualSkuData.sku || ''}
                         onChange={(e) => setManualSkuData({...manualSkuData, sku: e.target.value})}
-                        className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-[10px] text-blue-400 focus:border-blue-500/50 outline-none"
+                        className="form-control-mono"
                         placeholder="e.g. LAP-100"
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-[9px] uppercase text-white/40 font-bold">Base Code</label>
+                      <label className="text-xs font-medium text-slate-700">Base Code</label>
                       <input 
                         type="text" 
                         value={manualSkuData.base_code || ''}
                         onChange={(e) => setManualSkuData({...manualSkuData, base_code: e.target.value})}
-                        className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-[10px] text-white/80 focus:border-blue-500/50 outline-none"
+                        className="form-control"
                       />
                     </div>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="space-y-1">
-                      <label className="text-[9px] uppercase text-white/40 font-bold">Brand</label>
+                      <label className="text-xs font-medium text-slate-700">Brand</label>
                       <input 
                         type="text" 
                         value={manualSkuData.brand || ''}
                         onChange={(e) => setManualSkuData({...manualSkuData, brand: e.target.value})}
-                        className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-[10px] text-white/80 focus:border-blue-500/50 outline-none"
+                        className="form-control"
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-[9px] uppercase text-white/40 font-bold">EAN</label>
+                      <label className="text-xs font-medium text-slate-700">EAN</label>
                       <input 
                         type="text" 
                         value={manualSkuData.ean || ''}
                         onChange={(e) => setManualSkuData({...manualSkuData, ean: e.target.value})}
-                        className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-[10px] text-white/80 focus:border-blue-500/50 outline-none"
+                        className="form-control"
                       />
                     </div>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="space-y-1">
-                      <label className="text-[9px] uppercase text-white/40 font-bold">Weight (kg)</label>
+                      <label className="text-xs font-medium text-slate-700">Weight (kg)</label>
                       <input 
                         type="text" 
                         value={manualSkuData.shipping_weight || ''}
                         onChange={(e) => setManualSkuData({...manualSkuData, shipping_weight: e.target.value})}
-                        className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-[10px] text-white/80 focus:border-blue-500/50 outline-none"
+                        className="form-control"
                       />
                     </div>
                     <div className="space-y-1">
-                      <label className="text-[9px] uppercase text-white/40 font-bold">Product Type</label>
+                      <label className="text-xs font-medium text-slate-700">Product Type</label>
                       <input 
                         type="text" 
                         value={manualSkuData.product_type || ''}
                         onChange={(e) => setManualSkuData({...manualSkuData, product_type: e.target.value})}
-                        className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-[10px] text-white/80 focus:border-blue-500/50 outline-none"
+                        className="form-control"
                       />
                     </div>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="space-y-1">
-                      <label className="text-[9px] uppercase text-white/40 font-bold">Attr Set</label>
+                      <label className="text-xs font-medium text-slate-700">Attribute Set</label>
                       <select 
                         value={manualSkuData.attribute_set || ''}
                         onChange={(e) => setManualSkuData({...manualSkuData, attribute_set: e.target.value})}
-                        className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-[10px] text-white/80 focus:border-blue-500/50 outline-none uppercase font-bold"
+                        className="form-control"
                       >
                          <option value="">Select Set...</option>
                          {appSettings.attributeSets.map((s, i) => (
@@ -2834,13 +2989,46 @@ export default function App() {
                 </div>
               )}
 
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-lg border border-stone-200 bg-white p-3">
+                  <div className="text-xs text-slate-500">Uploaded SKUs</div>
+                  <div className="mt-1 text-2xl font-semibold text-slate-950">{uploadedSkuCount}</div>
+                </div>
+                <div className="rounded-lg border border-stone-200 bg-white p-3">
+                  <div className="text-xs text-slate-500">attributes__ fields</div>
+                  <div className="mt-1 text-2xl font-semibold text-slate-950">{uploadedAttributeFields.size}</div>
+                </div>
+                <div className="rounded-lg border border-stone-200 bg-white p-3">
+                  <div className="text-xs text-slate-500">SAP truth source</div>
+                  <div className="mt-1 text-2xl font-semibold text-slate-950">{sapSourceCount}</div>
+                </div>
+                <div className="rounded-lg border border-stone-200 bg-white p-3">
+                  <div className="text-xs text-slate-500">Source URLs</div>
+                  <div className="mt-1 text-2xl font-semibold text-slate-950">{urlSourceCount + batchData.length}</div>
+                </div>
+                <div className="rounded-lg border border-stone-200 bg-white p-3">
+                  <div className="text-xs text-slate-500">PDF context</div>
+                  <div className="mt-1 text-2xl font-semibold text-slate-950">{pdfSourceCount}</div>
+                </div>
+              </div>
+
+              {uploadLatestSuccess ? (
+                <Alert tone="success" className="text-xs">{uploadLatestSuccess.message}</Alert>
+              ) : uploadedSkuCount === 0 ? (
+                <Alert tone="info" className="text-xs">No master index loaded yet. Upload Excel or add a manual SKU to start Pre-QA.</Alert>
+              ) : null}
+              {uploadLatestError ? (
+                <Alert tone="danger" className="text-xs">{uploadLatestError.message}</Alert>
+              ) : null}
+
               {/* Bulk delete action bar */}
               {selectedSkuIndexItems.length > 0 && (
-                <div className="flex items-center justify-between px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg">
-                  <span className="text-[9px] font-bold text-red-400 uppercase tracking-widest">{selectedSkuIndexItems.length} selected</span>
+                <div className="flex items-center justify-between rounded-lg border border-red-200 bg-red-50 px-3 py-2">
+                  <span className="text-xs font-medium text-red-700">{selectedSkuIndexItems.length} selected</span>
                   <button
+                    type="button"
                     onClick={() => handleBulkSkuDelete(selectedSkuIndexItems, 'indexer')}
-                    className="px-3 py-1 bg-red-600 hover:bg-red-500 text-white text-[9px] font-bold uppercase rounded transition-all"
+                    className="rounded bg-red-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-red-700"
                   >
                     Delete Selected
                   </button>
@@ -2850,10 +3038,10 @@ export default function App() {
               <div className="space-y-2 max-h-[400px] overflow-y-auto custom-scrollbar pr-2">
                  {/* Select all row */}
                  {skuIndex.length > 0 && (
-                   <div className="flex items-center gap-2 px-1 pb-1 border-b border-white/5">
+                   <div className="flex items-center gap-2 border-b border-stone-200 px-1 pb-2">
                      <input
                        type="checkbox"
-                       className="w-3 h-3 cursor-pointer accent-red-500"
+                       className="h-4 w-4 cursor-pointer rounded border-stone-300 accent-blue-600"
                        aria-label="Select all SKU index records"
                        checked={selectedSkuIndexItems.length === skuIndex.length}
                        onChange={(e) => {
@@ -2861,7 +3049,7 @@ export default function App() {
                          else setSelectedSkuIndexItems([]);
                        }}
                      />
-                     <span className="text-[8px] uppercase text-white/20 tracking-widest">Select All</span>
+                     <span className="text-xs text-slate-500">Select all indexed SKUs</span>
                    </div>
                  )}
                  <input type="file" className="hidden" ref={pdfInputRef} accept="application/pdf" aria-label="Attach PDF context to SKU" onChange={handlePdfFileChange} />
@@ -2870,11 +3058,11 @@ export default function App() {
                    const hasPdf = !!s.pdf_text;
                    const isChecked = selectedSkuIndexItems.includes(skuValue?.toString() ?? '');
                    return (
-                     <div key={i} className={`p-2 border rounded text-[10px] font-mono flex justify-between items-center group transition-colors ${isChecked ? 'bg-red-500/10 border-red-500/30' : 'bg-white/5 border-white/5'}`}>
+                     <div key={i} className={`flex items-center justify-between rounded-lg border p-3 text-xs transition-colors group ${isChecked ? 'border-blue-200 bg-blue-50' : 'border-stone-200 bg-white hover:border-blue-200 hover:bg-blue-50/50'}`}>
                         <div className="flex items-center gap-2">
                           <input
                             type="checkbox"
-                            className="w-3 h-3 cursor-pointer accent-red-500 flex-shrink-0"
+                            className="h-4 w-4 flex-shrink-0 cursor-pointer rounded border-stone-300 accent-blue-600"
                             aria-label={`Select SKU ${skuValue}`}
                             checked={isChecked}
                             onChange={(e) => {
@@ -2884,28 +3072,30 @@ export default function App() {
                             }}
                           />
                           <div className="flex flex-col">
-                            <span className="text-blue-400 font-bold flex items-center gap-2">
+                            <span className="flex items-center gap-2 font-mono font-semibold text-blue-700">
                               {skuValue}
                               {hasPdf && <span title="PDF Context Attached"><FileText className="w-3 h-3 text-cyan-400" /></span>}
                             </span>
-                            <span className="text-white/20 text-[8px] uppercase">{s.brand || s.Brand || 'Generic'}</span>
+                            <span className="text-xs text-slate-500">{s.brand || s.Brand || 'Generic'}</span>
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
                            <div className="text-right mr-2">
-                              <span className="text-white/40 block text-[9px]">{s.product_type || 'Uncategorized'}</span>
+                              <span className="block text-xs text-slate-500">{s.product_type || 'Uncategorized'}</span>
                            </div>
                            <button 
+                             type="button"
                              onClick={() => handlePdfTrigger(skuValue.toString())}
-                             className="w-5 h-5 flex items-center justify-center rounded bg-cyan-500/10 text-cyan-500 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-cyan-500 hover:text-white"
+                             className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-50 text-blue-700 opacity-0 transition-opacity hover:bg-blue-600 hover:text-white group-hover:opacity-100 focus:opacity-100"
                              title="Attach PDF as Context 1"
                              aria-label={`Attach PDF to SKU ${skuValue}`}
                            >
                              <FileText className="w-3.5 h-3.5" />
                            </button>
                            <button 
+                             type="button"
                              onClick={() => handleSkuDelete(skuValue.toString())}
-                             className="w-5 h-5 flex items-center justify-center rounded bg-red-500/10 text-red-500 opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-500 hover:text-white"
+                             className="flex h-7 w-7 items-center justify-center rounded-lg bg-red-50 text-red-700 opacity-0 transition-opacity hover:bg-red-600 hover:text-white group-hover:opacity-100 focus:opacity-100"
                              aria-label={`Delete SKU ${skuValue}`}
                            >
                              <X className="w-3.5 h-3.5" />
@@ -2918,25 +3108,79 @@ export default function App() {
             </div>
           )}
 
+          {currentModule === 'pre-qa' && (
+            <div className="space-y-5">
+              <div>
+                <p className="text-sm font-semibold text-slate-950">Readiness checks</p>
+                <p className="mt-1 text-xs text-slate-500">Pre-QA uses existing SKU, SAP, PDF, harvest, and output state. No data is changed here.</p>
+              </div>
+              <div className="space-y-2">
+                {workflowSteps.map((step, index) => {
+                  const active = index <= 1;
+                  return (
+                    <div key={step} className="flex items-center gap-3">
+                      <div className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs font-semibold ${active ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-stone-200 bg-white text-slate-400'}`}>
+                        {index + 1}
+                      </div>
+                      <span className={active ? 'text-sm font-medium text-slate-900' : 'text-sm text-slate-500'}>{step}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-lg border border-stone-200 bg-white p-3">
+                  <div className="text-xs text-slate-500">Ready for QA</div>
+                  <div className="mt-1 text-2xl font-semibold text-slate-950">{sourceReadyCount}</div>
+                </div>
+                <div className="rounded-lg border border-stone-200 bg-white p-3">
+                  <div className="text-xs text-slate-500">Missing source</div>
+                  <div className="mt-1 text-2xl font-semibold text-slate-950">{missingSourceCount}</div>
+                </div>
+                <div className="rounded-lg border border-stone-200 bg-white p-3">
+                  <div className="text-xs text-slate-500">SAP rows</div>
+                  <div className="mt-1 text-2xl font-semibold text-slate-950">{sapSourceCount}</div>
+                </div>
+                <div className="rounded-lg border border-stone-200 bg-white p-3">
+                  <div className="text-xs text-slate-500">Harvest rows</div>
+                  <div className="mt-1 text-2xl font-semibold text-slate-950">{harvestSourceCount}</div>
+                </div>
+              </div>
+              {uploadedSkuCount === 0 ? (
+                <Alert tone="warning" className="text-xs">Upload a master index before Pre-QA can evaluate readiness.</Alert>
+              ) : missingSourceCount > 0 ? (
+                <Alert tone="warning" className="text-xs">{missingSourceCount} SKU(s) do not yet have SAP, PDF, or scraped harvest data.</Alert>
+              ) : (
+                <Alert tone="success" className="text-xs">All uploaded SKUs have at least one usable source in current state.</Alert>
+              )}
+              <div className="grid gap-2">
+                <Button onClick={() => setCurrentModule('upload')} variant="secondary" size="sm" className="w-full">
+                  Back to Upload
+                </Button>
+                <Button onClick={() => setCurrentModule('scrapper')} size="sm" className="w-full">
+                  Continue to Data Harvest
+                </Button>
+              </div>
+            </div>
+          )}
+
           {currentModule === 'settings' && (
-             <div className="p-6 border-b border-white/5 bg-blue-500/5">
+             <div className="p-6 border-b border-stone-200 bg-white">
                 <div className="flex items-center gap-3">
-                   <div className="w-10 h-10 bg-blue-600/20 rounded-xl flex items-center justify-center shadow-inner">
-                      <Settings className="w-5 h-5 text-blue-400 animate-spin-slow" />
+                   <div className="w-10 h-10 bg-blue-50 rounded-lg flex items-center justify-center">
+                      <Settings className="w-5 h-5 text-blue-700" />
                    </div>
                    <div>
-                      <h3 className="text-xs font-bold text-white uppercase tracking-[0.2em]">Logic Hub</h3>
-                      <p className="text-[9px] text-white/30 uppercase mt-0.5 font-mono">Status: Routing</p>
+                      <h3 className="text-sm font-semibold text-slate-950">Settings workspace</h3>
+                      <p className="mt-0.5 text-xs text-slate-500">Connectivity, mapping logic, schema hub, and allowlist controls.</p>
                    </div>
                 </div>
-                <div className="mt-6 p-4 bg-white/[0.02] border border-white/5 rounded-xl text-[10px] text-white/40 leading-relaxed italic">
-                    <p className="mb-2">Centralized Command active.</p>
-                    <p>The governance engine has been expanded to the primary console for deep-scale orchestrating.</p>
+                <div className="mt-6 rounded-lg border border-blue-100 bg-blue-50 p-4 text-xs leading-relaxed text-blue-800">
+                    <p>Settings changes keep existing persistence and admin restrictions intact.</p>
                 </div>
              </div>
           )}
 
-          <div id="cta-area" className="p-6 border-t border-white/5 bg-black/30">
+          <div id="cta-area" className="p-6 border-t border-stone-200 bg-white">
             {currentModule === 'scrapper' ? (
               <div className="space-y-3">
                 {scraperBlockedReason && !isScraping ? (
@@ -2955,34 +3199,34 @@ export default function App() {
                 </Button>
               </div>
             ) : (
-               <Alert tone="info" className="text-center text-[10px] font-bold uppercase tracking-widest">Global Status Ready</Alert>
+               <Alert tone="info" className="text-center text-xs">Workflow ready</Alert>
             )}
           </div>
         </aside>
         {/* CENTER PANEL: INTERACTIVE HUB */}
-        <section id="main-content" className="flex-1 flex flex-col bg-black/5 min-h-0 relative">
+        <section id="main-content" className="flex-1 flex flex-col bg-brand-bg min-h-0 relative">
           <div className="flex-1 p-6 overflow-y-auto custom-scrollbar flex flex-col gap-6 min-h-0">
              {/* MODULE VIEW CONDITIONAL */}
              {currentModule === 'settings' ? (
-                <div className="flex-1 flex flex-col p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full">
+                <div className="settings-saas flex-1 flex flex-col p-4 sm:p-6 lg:p-8 max-w-7xl mx-auto w-full">
                    <motion.div 
                      initial={{ opacity: 0, y: 10 }}
                      animate={{ opacity: 1, y: 0 }}
                      className="flex flex-col gap-8 w-full"
                    >
-                    <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 pb-6 border-b border-white/5">
+                    <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 pb-6 border-b border-stone-200">
                        <div className="space-y-1 text-left">
                          <div className="flex items-center gap-2 text-blue-500 mb-1">
-                           <Settings className="w-4 h-4 animate-spin-slow" />
-                           <span className="text-[10px] font-bold uppercase tracking-[0.3em]">System Core</span>
+                           <Settings className="w-4 h-4" />
+                           <span className="text-xs font-medium">Admin configuration</span>
                          </div>
-                         <h2 className="text-3xl sm:text-4xl lg:text-5xl font-black tracking-tight text-white">Logic Governance</h2>
-                         <p className="text-[11px] text-white/30 uppercase tracking-[0.2em] font-medium max-w-md leading-relaxed">
-                           Orchestrate AI synthesis parameters and attribute indexing schemas.
+                         <h2 className="text-2xl font-semibold tracking-tight text-slate-950">Settings</h2>
+                         <p className="mt-1 max-w-xl text-sm text-slate-500">
+                           Manage connectivity, global mapping logic, attribute schemas, and user access.
                          </p>
                        </div>
                        
-                       <div className="flex bg-white/5 p-1.5 rounded-2xl border border-white/10 backdrop-blur-md shadow-2xl">
+                       <div className="flex flex-wrap gap-1 rounded-lg border border-stone-200 bg-white p-1 shadow-sm">
                           {[
                             { id: 'api', label: 'Connectivity', icon: Globe },
                             { id: 'mapping', label: 'Mapping Logic', icon: Network },
@@ -2991,16 +3235,16 @@ export default function App() {
                             <button 
                               key={tab.id}
                               onClick={() => setSettingsSubModule(tab.id as any)}
-                              className={`relative px-6 py-3 text-[10px] font-bold uppercase tracking-widest transition-all rounded-xl flex items-center gap-2.5 overflow-hidden group ${settingsSubModule === tab.id ? 'text-white' : 'text-white/30 hover:text-white/60'}`}
+                              className={`relative flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors ${settingsSubModule === tab.id ? 'text-white' : 'text-slate-600 hover:bg-stone-50 hover:text-slate-900'}`}
                             >
                               {settingsSubModule === tab.id && (
                                 <motion.div 
                                   layoutId="activeTabSettingsFull"
-                                  className="absolute inset-0 bg-blue-600 shadow-[0_0_30px_rgba(37,99,235,0.4)]"
+                                  className="absolute inset-0 bg-blue-600"
                                   transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
                                 />
                               )}
-                              <tab.icon className={`w-3.5 h-3.5 relative z-10 ${settingsSubModule === tab.id ? 'text-white' : 'text-white/40 group-hover:text-white/60'}`} />
+                              <tab.icon className={`w-3.5 h-3.5 relative z-10 ${settingsSubModule === tab.id ? 'text-white' : 'text-slate-500'}`} />
                               <span className="relative z-10">{tab.label}</span>
                             </button>
                           ))}
@@ -3018,8 +3262,7 @@ export default function App() {
                            className="relative w-full pr-4 text-left"
                          >
                             {settingsSubModule === 'api' && (
-                              <div className="grid grid-cols-1 lg:grid-cols-2 gap-12 pt-4 pb-20">
-                                 <div className="space-y-8">
+                              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 pt-4 pb-20">
                                     <section className="space-y-6">
                                        <div className="flex items-center gap-4">
                                          <div className="w-14 h-14 bg-blue-600/10 border border-blue-500/20 rounded-2xl flex items-center justify-center shadow-inner">
@@ -3044,7 +3287,7 @@ export default function App() {
                                                <span className="text-[9px] text-blue-400/50 font-mono">DeepSeek-V4-Flash</span>
                                              </div>
                                              <div className="flex flex-col gap-3">
-                                                <div className="flex gap-4">
+                                                <div className="flex flex-col gap-3 sm:flex-row">
                                                    <div className="relative flex-1">
                                                      <input 
                                                        type="password" 
@@ -3057,7 +3300,7 @@ export default function App() {
                                                    <button 
                                                      onClick={() => persistSettings(appSettings)}
                                                      disabled={isSavingSettings}
-                                                     className="px-8 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 disabled:text-white/50 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border border-blue-500/20 shadow-xl"
+                                                     className="shrink-0 px-5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 disabled:text-white/50 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border border-blue-500/20 shadow-xl"
                                                    >
                                                       {isSavingSettings ? 'SAVING...' : 'SAVE KEY'}
                                                    </button>
@@ -3069,7 +3312,7 @@ export default function App() {
                                                          persistSettings(updatedSettings);
                                                        }
                                                      }}
-                                                     className="px-8 bg-red-600/5 hover:bg-red-600 text-red-500 hover:text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border border-red-500/10 hover:border-red-600 shadow-xl"
+                                                     className="shrink-0 px-5 bg-red-600/5 hover:bg-red-600 text-red-500 hover:text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border border-red-500/10 hover:border-red-600 shadow-xl"
                                                    >
                                                       WIPE
                                                    </button>
@@ -3197,16 +3440,6 @@ export default function App() {
                                         )}
                                       </div>
                                     </section>
-                                 </div>
-
-                                 <div className="hidden lg:block relative">
-                                    <div className="absolute inset-0 bg-gradient-to-br from-blue-600/5 to-transparent rounded-[40px] border border-white/5 p-16 flex flex-col justify-center gap-8 shadow-inner">
-                                       <div className="w-24 h-1.5 w-full bg-white/5 rounded-full" />
-                                       <div className="w-48 h-1.5 w-full bg-white/5 rounded-full" />
-                                       <div className="w-32 h-1.5 w-full bg-white/5 rounded-full" />
-                                       <div className="text-6xl font-black text-white/[0.03] select-none leading-none">SYSTEM<br/>STATUS OK</div>
-                                    </div>
-                                 </div>
                               </div>
                             )}
 
@@ -3237,7 +3470,16 @@ export default function App() {
                                                   <Network className="w-6 h-6 text-purple-400" />
                                                 </div>
                                                 <div>
-                                                   <span className="text-lg font-black text-white tracking-tight leading-none block mb-1">{set.name}</span>
+                                                   <span className="flex items-center gap-2 text-lg font-black text-white tracking-tight leading-none mb-1">
+                                                     {set.name}
+                                                     {(set.mdRules || '').trim() && (
+                                                       <span
+                                                         className="block h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-100"
+                                                         title="Mapping logic attached"
+                                                         aria-label="Mapping logic attached"
+                                                       />
+                                                     )}
+                                                   </span>
                                                    <p className="text-[9px] text-white/20 uppercase tracking-widest">{set.fields.length} Logic Points</p>
                                                 </div>
                                              </div>
@@ -3252,7 +3494,7 @@ export default function App() {
                                                      onClick={() => setEditingSetRules(idx)} 
                                                      className="text-[9px] px-3 py-1 bg-white/5 hover:bg-purple-600 rounded border border-white/10 text-white/60 hover:text-white uppercase font-bold transition-all"
                                                    >
-                                                     {set.mdRules ? 'EDIT LOGIC' : 'ADD LOGIC'}
+                                                     {(set.mdRules || '').trim() ? 'EDIT LOGIC' : 'ADD LOGIC'}
                                                    </button>
                                                 </div>
                                               </div>
@@ -3367,64 +3609,82 @@ export default function App() {
                                       </div>
                                     </div>
 
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                                       {appSettings.attributeSets.map((set, idx) => (
-                                         <motion.div 
-                                           initial={{ opacity: 0, scale: 0.95 }}
-                                           animate={{ opacity: 1, scale: 1 }}
-                                           key={idx} 
-                                           className="bg-[#0a0a0a] border border-white/5 rounded-[32px] p-8 hover:bg-white/[0.03] transition-all group relative overflow-hidden shadow-2xl"
-                                         >
-                                            <div className="absolute -right-6 -top-6 w-32 h-32 bg-white/[0.02] rounded-full blur-3xl pointer-events-none" />
-                                            
-                                            <div className="absolute top-6 right-6 flex gap-2 opacity-0 group-hover:opacity-100 transition-all">
-                                              <button 
-                                                onClick={() => {
-                                                  setNewAttrName(set.name);
-                                                  setNewAttrFields(set.fields.join(', '));
-                                                  const newSets = appSettings.attributeSets.filter((_, i) => i !== idx);
-                                                  const updatedSettings = {...appSettings, attributeSets: newSets};
-                                                  setAppSettings(updatedSettings);
-                                                  persistSettings(updatedSettings);
-                                                }}
-                                                className="p-2.5 bg-blue-600/10 hover:bg-blue-600 text-blue-400 hover:text-white rounded-xl transition-all"
-                                                title="Modify Schema"
-                                              >
-                                                <Settings className="w-5 h-5" />
-                                              </button>
-                                              <button 
-                                                onClick={() => {
-                                                  const newSets = appSettings.attributeSets.filter((_, i) => i !== idx);
-                                                  const updatedSettings = {...appSettings, attributeSets: newSets};
-                                                  setAppSettings(updatedSettings);
-                                                  persistSettings(updatedSettings);
-                                                }}
-                                                className="p-2.5 bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white rounded-xl transition-all"
-                                                title="Delete Schema"
-                                              >
-                                                <X className="w-5 h-5" />
-                                              </button>
-                                            </div>
+                                    <div className="grid grid-cols-1 gap-3">
+                                       {appSettings.attributeSets.map((set, idx) => {
+                                         const isExpanded = expandedSchemaIdx === idx;
+                                         return (
+                                           <motion.div 
+                                             initial={{ opacity: 0, scale: 0.98 }}
+                                             animate={{ opacity: 1, scale: 1 }}
+                                             key={idx} 
+                                             className="bg-[#0a0a0a] border border-white/5 rounded-[32px] p-0 transition-all group overflow-hidden shadow-2xl"
+                                           >
+                                              <div className="flex items-center gap-3 p-4">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => setExpandedSchemaIdx(isExpanded ? null : idx)}
+                                                  aria-expanded={isExpanded}
+                                                  className="flex min-w-0 flex-1 items-center gap-4 rounded-lg text-left transition-colors hover:bg-stone-50 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
+                                                >
+                                                  <div className="w-10 h-10 bg-blue-600/10 border border-blue-500/20 rounded-2xl flex shrink-0 items-center justify-center shadow-inner">
+                                                    <Layout className="w-5 h-5 text-blue-400" />
+                                                  </div>
+                                                  <div className="min-w-0">
+                                                    <span className="text-base font-black text-white tracking-tight leading-none block truncate">{set.name}</span>
+                                                    <p className="mt-1 text-[9px] text-white/20 uppercase tracking-widest">{set.fields.length} Attribute Headers</p>
+                                                  </div>
+                                                  <span className="ml-auto shrink-0 text-[10px] font-bold uppercase tracking-widest text-blue-500">
+                                                    {isExpanded ? 'Hide' : 'Show'}
+                                                  </span>
+                                                </button>
+                                                <div className="flex shrink-0 gap-2">
+                                                  <button 
+                                                    onClick={() => {
+                                                      setNewAttrName(set.name);
+                                                      setNewAttrFields(set.fields.join(', '));
+                                                      const newSets = appSettings.attributeSets.filter((_, i) => i !== idx);
+                                                      const updatedSettings = {...appSettings, attributeSets: newSets};
+                                                      setAppSettings(updatedSettings);
+                                                      setExpandedSchemaIdx(null);
+                                                      persistSettings(updatedSettings);
+                                                    }}
+                                                    className="p-2.5 bg-blue-600/10 hover:bg-blue-600 text-blue-400 hover:text-white rounded-xl transition-all"
+                                                    title="Modify Schema"
+                                                    aria-label={`Modify schema ${set.name}`}
+                                                  >
+                                                    <Settings className="w-5 h-5" />
+                                                  </button>
+                                                  <button 
+                                                    onClick={() => {
+                                                      const newSets = appSettings.attributeSets.filter((_, i) => i !== idx);
+                                                      const updatedSettings = {...appSettings, attributeSets: newSets};
+                                                      setAppSettings(updatedSettings);
+                                                      setExpandedSchemaIdx(null);
+                                                      persistSettings(updatedSettings);
+                                                    }}
+                                                    className="p-2.5 bg-red-600/10 hover:bg-red-600 text-red-500 hover:text-white rounded-xl transition-all"
+                                                    title="Delete Schema"
+                                                    aria-label={`Delete schema ${set.name}`}
+                                                  >
+                                                    <X className="w-5 h-5" />
+                                                  </button>
+                                                </div>
+                                              </div>
 
-                                            <div className="flex items-center gap-5 mb-8">
-                                               <div className="w-12 h-12 bg-blue-600/10 border border-blue-500/20 rounded-2xl flex items-center justify-center shadow-inner">
-                                                 <Layout className="w-6 h-6 text-blue-400" />
-                                               </div>
-                                               <div>
-                                                  <span className="text-lg font-black text-white tracking-tight leading-none block mb-1">{set.name}</span>
-                                                  <p className="text-[9px] text-white/20 uppercase tracking-widest">{set.fields.length} Logic Points</p>
-                                               </div>
-                                            </div>
-
-                                            <div className="flex flex-wrap gap-2.5 mb-6">
-                                               {set.fields.map((f, i) => (
-                                                 <span key={i} className="px-4 py-1.5 bg-black/60 border border-white/10 rounded-xl text-[10px] text-white/50 font-mono hover:text-blue-400 hover:border-blue-500/40 transition-colors shadow-inner">
-                                                   {f}
-                                                 </span>
-                                               ))}
-                                            </div>
-                                         </motion.div>
-                                       ))}
+                                              {isExpanded && (
+                                                <div className="border-t border-white/10 px-4 pb-4 pt-3">
+                                                  <div className="flex flex-wrap gap-2.5">
+                                                    {set.fields.map((f, i) => (
+                                                      <span key={i} className="px-4 py-1.5 bg-black/60 border border-white/10 rounded-xl text-[10px] text-white/50 font-mono hover:text-blue-400 hover:border-blue-500/40 transition-colors shadow-inner">
+                                                        {f}
+                                                      </span>
+                                                    ))}
+                                                  </div>
+                                                </div>
+                                              )}
+                                           </motion.div>
+                                         );
+                                       })}
                                        
                                        {appSettings.attributeSets.length === 0 && (
                                          <div className="col-span-full py-40 border border-dashed border-white/10 rounded-[48px] flex flex-col items-center justify-center text-center opacity-30">
@@ -3451,35 +3711,33 @@ export default function App() {
                            initial={{ opacity: 0 }}
                            animate={{ opacity: 1 }}
                            exit={{ opacity: 0 }}
-                           className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-3xl p-12 flex items-center justify-center"
+                           className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/70 p-6 backdrop-blur-md"
                          >
                            <motion.div 
                              initial={{ scale: 0.95, opacity: 0 }}
                              animate={{ scale: 1, opacity: 1 }}
                              exit={{ scale: 0.95, opacity: 0 }}
-                             className="w-full max-w-6xl bg-[#0a0a0a] border border-white/10 rounded-[40px] shadow-[0_0_100px_rgba(0,0,0,0.8)] flex flex-col h-[85vh] overflow-hidden"
+                             className="flex h-[85vh] w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-stone-200 bg-white shadow-2xl"
                            >
-                             <div className="p-10 border-b border-white/5 flex items-center justify-between shrink-0 bg-white/[0.01]">
-                                <div className="flex items-center gap-6">
-                                   <div className="w-16 h-16 bg-blue-600/10 border border-blue-500/20 rounded-2xl flex items-center justify-center">
-                                     <Zap className="w-8 h-8 text-blue-400" />
+                             <div className="flex shrink-0 items-center justify-between border-b border-stone-200 bg-white p-6">
+                                <div className="flex items-center gap-4">
+                                   <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
+                                     <Zap className="w-6 h-6" />
                                    </div>
                                    <div>
-                                      <h3 className="text-3xl font-black text-white tracking-tighter">
-                                        Mapping Logic Governance
-                                      </h3>
-                                      <p className="text-xs text-white/30 uppercase tracking-[0.3em] mt-2 font-bold">Instruction Set for {appSettings.attributeSets[editingSetRules].name}</p>
+                                      <h3 className="text-xl font-semibold text-slate-950">Mapping logic</h3>
+                                      <p className="mt-1 text-sm text-slate-500">Instruction set for {appSettings.attributeSets[editingSetRules].name}</p>
                                    </div>
                                 </div>
                                 <button 
                                   onClick={() => setEditingSetRules(null)}
-                                  className="w-14 h-14 bg-white/5 border border-white/10 rounded-2xl flex items-center justify-center text-white/40 hover:text-white hover:bg-white/10 transition-all hover:scale-110 active:scale-95"
+                                  className="flex h-10 w-10 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-stone-100 hover:text-slate-700"
                                 >
-                                  <X className="w-6 h-6" />
+                                  <X className="w-5 h-5" />
                                 </button>
                              </div>
 
-                             <div className="flex-1 p-10 overflow-hidden flex flex-col bg-black/20">
+                             <div className="flex flex-1 flex-col overflow-hidden bg-stone-50 p-6">
                                 <textarea 
                                   value={appSettings.attributeSets[editingSetRules].mdRules || ''}
                                   onChange={(e) => {
@@ -3487,27 +3745,22 @@ export default function App() {
                                      newSets[editingSetRules] = { ...newSets[editingSetRules], mdRules: e.target.value };
                                      setAppSettings({...appSettings, attributeSets: newSets});
                                   }}
-                                  className="flex-1 bg-black/40 border border-white/10 rounded-[32px] p-10 text-xl text-white/90 font-mono focus:outline-none focus:border-blue-500/50 transition-all resize-none leading-relaxed placeholder:text-white/5 custom-scrollbar"
+                                  className="flex-1 resize-none rounded-lg border border-slate-800 bg-slate-950 p-5 font-mono text-sm leading-relaxed text-slate-100 outline-none transition-colors placeholder:text-slate-500 focus:border-blue-500 custom-scrollbar"
                                   placeholder="Define production logic rules here (Markdown format)..."
                                   autoFocus
                                 />
                              </div>
 
-                             <div className="p-10 border-t border-white/5 flex items-center justify-between bg-white/[0.01] shrink-0">
-                                <div className="flex items-center gap-8 text-[11px] text-white/20 font-bold uppercase tracking-widest">
-                                   <div className="flex items-center gap-3">
-                                     <div className="w-2.5 h-2.5 bg-blue-500 rounded-full shadow-[0_0_10px_rgba(59,130,246,0.5)]" />
-                                     Protocol Synthesis Instance
-                                   </div>
-                                </div>
+                             <div className="flex shrink-0 items-center justify-between border-t border-stone-200 bg-white p-6">
+                                <div className="text-sm text-slate-500">Saved rules stay on the existing settings payload.</div>
                                 <button 
                                   onClick={() => {
                                     persistSettings(appSettings);
                                     setEditingSetRules(null);
                                   }}
-                                  className="px-12 py-5 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl text-[11px] font-black uppercase tracking-[0.5em] transition-all shadow-[0_0_40px_rgba(37,99,235,0.3)] active:scale-95"
+                                  className="rounded-md bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-700"
                                 >
-                                  COMMIT MAPPING RULES
+                                  Save mapping rules
                                 </button>
                              </div>
                            </motion.div>
@@ -3515,13 +3768,12 @@ export default function App() {
                        )}
                      </AnimatePresence>
 
-                    <div className="flex justify-end pt-10 pb-4 shrink-0 mt-auto">
+                    <div className="flex justify-end pt-6 pb-4 shrink-0 mt-auto">
                       <button 
                         onClick={() => persistSettings(appSettings)} 
-                        className="group relative px-16 py-5 bg-blue-600 hover:bg-blue-500 text-white rounded-[20px] text-[11px] font-black uppercase tracking-[0.5em] transition-all shadow-[0_0_60px_rgba(37,99,235,0.25)] active:scale-95 overflow-hidden"
+                        className="rounded-md bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-700"
                       >
-                        <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
-                        DEPLOY CORE CONFIG
+                        {isSavingSettings ? 'Saving settings...' : 'Save settings'}
                       </button>
                     </div>
                   </motion.div>
@@ -3739,30 +3991,46 @@ export default function App() {
                  </div>
                </>
              ) : currentModule === 'jobs' ? (
-               <div className="flex-1 flex flex-col gap-6">
+               <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6">
                   <div className="responsive-toolbar">
                     <div>
-                      <h2 className="text-2xl font-bold tracking-tight">AI Mapping Dispatch</h2>
-                      <p className="text-[11px] text-white/40 uppercase tracking-widest mt-1">Bind SKU Master with Collected Markdown Assets</p>
+                      <h2 className="text-2xl font-semibold tracking-tight text-slate-950">QA Jobs</h2>
+                      <p className="mt-1 text-sm text-slate-500">Map SKUs, inspect source readiness, and export completed QA results.</p>
                     </div>
                     <div className="responsive-actions">
-                        <Button onClick={() => fetchJobs()} variant="secondary" size="md"><Activity className="w-3.5 h-3.5" /> RE-SYNC</Button>
+                        <Button onClick={() => fetchJobs()} variant="secondary" size="md"><Activity className="w-3.5 h-3.5" /> Re-sync</Button>
                         {selectedJobs.length > 0 && (
                           <Button
                             onClick={() => handleBulkSkuDelete(selectedJobs, 'jobs')}
                             variant="danger"
                             size="md"
                           >
-                            <X className="w-3.5 h-3.5" /> DELETE ({selectedJobs.length})
+                            <X className="w-3.5 h-3.5" /> Delete ({selectedJobs.length})
                           </Button>
                         )}
-                        <Button onClick={() => {
-                          const query = selectedJobs.length > 0 ? `?skus=${selectedJobs.join(',')}` : '';
-                          window.open(`/api/outputs/xlsx${query}`)
-                        }} className="bg-green-600 hover:bg-green-500" size="md">
-                           EXPORT MASTER XLS {selectedJobs.length > 0 ? `(${selectedJobs.length})` : ''}
+                        <Button onClick={handleExportOutputs} disabled={isExportingOutputs} className="bg-green-600 hover:bg-green-500" size="md">
+                           {isExportingOutputs ? 'Exporting...' : `Export XLS ${selectedJobs.length > 0 ? `(${selectedJobs.length})` : ''}`}
                         </Button>
                     </div>
+                  </div>
+                  {outputExportError ? (
+                    <Alert tone="danger" className="text-xs">{outputExportError}</Alert>
+                  ) : null}
+
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+                    {[
+                      ['Total SKUs', jobsTotal ?? jobs.length, 'Jobs in the current queue', 'neutral'],
+                      ['Ready for mapping', readyMappingJobCount, 'Can run Map AI now', 'blue'],
+                      ['In progress', inProgressJobCount, 'Queued or running jobs', 'blue'],
+                      ['Completed outputs', completedJobCount, 'Output JSON available', 'green'],
+                      ['Failed or pending', failedJobCount + pendingJobCount, 'Needs attention', failedJobCount > 0 ? 'red' : 'amber'],
+                    ].map(([label, value, help, tone]) => (
+                      <Card key={label as string} className="p-4">
+                        <Badge tone={tone as any}>{label}</Badge>
+                        <div className="mt-3 text-3xl font-semibold text-slate-950">{value}</div>
+                        <div className="mt-1 text-xs text-slate-500">{help}</div>
+                      </Card>
+                    ))}
                   </div>
 
                   {/* Search bar */}
@@ -3780,14 +4048,14 @@ export default function App() {
                       className="text-xs"
                     />
                     {jobsTotal !== undefined && (
-                      <span className="text-[11px] text-white/30 whitespace-nowrap">
+                      <span className="whitespace-nowrap text-sm text-slate-500">
                         {jobs.length} / {jobsTotal} SKUs
                       </span>
                     )}
                   </div>
 
                       <div className="data-table-shell flex flex-1 flex-col">
-                      <div className="data-table-header grid h-12 grid-cols-[1fr_8fr_8fr_6fr_5fr_4fr_4fr] items-center px-6">
+                      <div className="data-table-header grid min-w-[1280px] grid-cols-[1fr_5fr_7fr_5fr_7fr_4fr_3fr_6fr_7fr] items-center px-6 py-3">
                          <div className="flex items-center">
                            <input 
                              type="checkbox" 
@@ -3803,18 +4071,20 @@ export default function App() {
                              }}
                            />
                          </div>
-                         <div>SKU INDEX</div>
-                         <div>PRODUCT IDENTITY</div>
-                         <div>PROTOCOL</div>
-                         <div>HARVEST DATA</div>
-                         <div>LIFECYCLE</div>
-                         <div className="text-right">DISPATCH</div>
+                         <div>SKU</div>
+                         <div>Product</div>
+                         <div>Attribute set</div>
+                         <div>Source readiness</div>
+                         <div>Status / output</div>
+                         <div>Retry</div>
+                         <div>Model</div>
+                         <div className="text-right">Actions</div>
                       </div>
                       <div className="flex-1 overflow-y-auto custom-scrollbar">
                          {jobs.map((job, idx) => {
                             const jobAttributeSet = readSkuAttributeSetForDisplay(job);
                             return (
-                            <div key={idx} className="data-table-row grid min-h-14 grid-cols-[1fr_8fr_8fr_6fr_5fr_4fr_4fr] items-center px-6">
+                            <div key={idx} className="data-table-row grid min-h-20 min-w-[1280px] grid-cols-[1fr_5fr_7fr_5fr_7fr_4fr_3fr_6fr_7fr] items-center px-6 py-3">
                                <div className="flex items-center">
                                  <input 
                                    type="checkbox" 
@@ -3827,16 +4097,16 @@ export default function App() {
                                    }}
                                  />
                                </div>
-                               <div className="text-[11px] font-mono text-blue-500 font-bold">{job.sku}</div>
-                               <div className="text-[11px] font-medium text-white/80 truncate pr-6">{job.title || 'Unknown Product Entity'}</div>
-                               <div className="text-[10px] font-bold text-blue-400/60 uppercase tracking-tighter truncate">{jobAttributeSet || 'DEFAULT'}</div>
-                               <div className="flex flex-col justify-center gap-1 text-[10px] font-mono">
+                               <div className="font-mono text-sm font-semibold text-blue-700">{job.sku}</div>
+                               <div className="truncate pr-6 text-sm font-medium text-slate-700">{job.title || 'Unknown product'}</div>
+                               <div className="truncate text-xs font-medium text-slate-600">{jobAttributeSet || 'Default'}</div>
+                               <div className="flex flex-col justify-center gap-1 text-xs">
                                  {job.harvestFile && (
                                    <div className="flex items-center gap-2">
-                                     <Badge tone="green" className="rounded-md">HARVEST_READY</Badge>
+                                     <Badge tone="green" className="rounded-md">Harvest</Badge>
                                      <button
                                        onClick={() => openHarvestFile(job.harvestFile!, 'job harvest')}
-                                       className="w-4 h-4 bg-white/5 hover:bg-white/10 text-blue-400 rounded flex items-center justify-center transition-all"
+                                       className="flex h-5 w-5 items-center justify-center rounded bg-blue-50 text-blue-700 transition-colors hover:bg-blue-100"
                                        title="Open Harvest File"
                                        aria-label={`Open harvest file for ${job.sku}`}
                                      >
@@ -3844,7 +4114,7 @@ export default function App() {
                                      </button>
                                      <button 
                                        onClick={() => handleHarvestDelete(job.harvestFile!)}
-                                       className="w-4 h-4 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded flex items-center justify-center transition-all"
+                                       className="flex h-5 w-5 items-center justify-center rounded bg-red-50 text-red-700 transition-colors hover:bg-red-600 hover:text-white"
                                        title="Delete Harvest File"
                                        aria-label={`Delete harvest file for ${job.sku}`}
                                      >
@@ -3854,26 +4124,29 @@ export default function App() {
                                  )}
                                  {job.hasPdf && (
                                    <div className="flex items-center gap-2">
-                                     <Badge tone="blue" className="rounded-md">PDF_ARCHIVED</Badge>
-                                     <button onClick={() => handleViewPdf(job.sku)} className="w-4 h-4 bg-white/5 hover:bg-white/10 text-blue-400 rounded flex items-center justify-center transition-all" title="View PDF Extracted Text" aria-label={`View PDF text for ${job.sku}`}><FileText className="w-3 h-3" /></button>
+                                     <Badge tone="blue" className="rounded-md">PDF</Badge>
+                                     <button onClick={() => handleViewPdf(job.sku)} className="flex h-5 w-5 items-center justify-center rounded bg-blue-50 text-blue-700 transition-colors hover:bg-blue-100" title="View PDF Extracted Text" aria-label={`View PDF text for ${job.sku}`}><FileText className="w-3 h-3" /></button>
                                    </div>
                                  )}
                                {job.hasSapData && (
                                  <div className="flex items-center gap-2">
-                                   <Badge tone="amber" className="rounded-md">SAP_DATA</Badge>
+                                   <Badge tone="amber" className="rounded-md">SAP truth</Badge>
                                  </div>
                                )}
-                               {!job.harvestFile && !job.hasPdf && !job.hasSapData && <Badge tone="neutral" className="rounded-md">NO_DATA_LINK</Badge>}
+                               {!job.harvestFile && !job.hasPdf && !job.hasSapData && <Badge tone="neutral" className="rounded-md">No source</Badge>}
                               </div>
                               <div className="flex items-center gap-2">
-                                 <Badge tone={job.status === 'completed' ? 'green' : job.status === 'ready' ? 'blue' : 'neutral'} className="rounded-md">
+                                 <Badge tone={job.status === 'completed' ? 'green' : job.status === 'failed' ? 'red' : job.status === 'pending' ? 'amber' : job.status === 'ready' || job.status === 'queued' || job.status === 'running' ? 'blue' : 'neutral'} className="rounded-md">
                                    <span className={`h-1.5 w-1.5 rounded-full ${job.status === 'completed' ? 'bg-emerald-400' : job.status === 'ready' ? 'bg-blue-400 animate-pulse' : 'bg-white/30'}`} />
                                    {job.status}
+                                 </Badge>
+                                 <Badge tone={job.status === 'completed' ? 'green' : 'neutral'} className="rounded-md">
+                                   {job.status === 'completed' ? 'Output' : 'No output'}
                                  </Badge>
                                  {job.status === 'completed' && (
                                    <button 
                                      onClick={() => handleOutputDelete(job.sku)}
-                                     className="w-4 h-4 bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white rounded flex items-center justify-center transition-all ml-1"
+                                     className="ml-1 flex h-5 w-5 items-center justify-center rounded bg-red-50 text-red-700 transition-colors hover:bg-red-600 hover:text-white"
                                      title="Delete Output JSON"
                                      aria-label={`Delete output for ${job.sku}`}
                                    >
@@ -3881,11 +4154,21 @@ export default function App() {
                                    </button>
                                  )}
                               </div>
+                              <div className="text-sm text-slate-500">{(job as any).retryCount ?? '-'}</div>
+                              <div className="truncate text-xs text-slate-500">{jobAiModels[job.sku] || DEFAULT_MAP_AI_MODELS[0]}</div>
                               <div className="text-right">
+                                 <div className="flex flex-wrap items-center justify-end gap-2">
+                                   <Button
+                                     onClick={() => { setReviewSku(job.sku); setCurrentModule('review'); }}
+                                     variant="secondary"
+                                     size="sm"
+                                   >
+                                     Review
+                                   </Button>
                                  {job.status === 'completed' ? (
                                    <button 
                                      onClick={() => fetchOutput(job.sku)}
-                                     className="p-2 rounded bg-white/5 hover:bg-white/10 transition-all text-blue-400 hover:text-blue-300"
+                                     className="rounded-lg border border-blue-200 bg-blue-50 p-2 text-blue-700 transition-colors hover:bg-blue-100"
                                      title="View/Edit Output"
                                      aria-label={`View or edit output for ${job.sku}`}
                                    >
@@ -3898,7 +4181,7 @@ export default function App() {
                                          value={jobAiModels[job.sku] || DEFAULT_MAP_AI_MODELS[0]}
                                          onChange={(e) => setJobAiModels({...jobAiModels, [job.sku]: e.target.value})}
                                          aria-label={`AI model for ${job.sku}`}
-                                         className="px-2 py-1 bg-white/5 border border-white/10 rounded text-[9px] font-bold uppercase text-white/50 focus:outline-none focus:border-white/20 transition-all cursor-pointer h-[26px]"
+                                         className="h-[30px] rounded-md border border-stone-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                                        >
                                          {DEFAULT_MAP_AI_MODELS.map((model) => (
                                            <option key={model} value={model}>{model}</option>
@@ -3911,8 +4194,8 @@ export default function App() {
                                            value={customJobAiModels[job.sku] || ''}
                                            onChange={(e) => setCustomJobAiModels({...customJobAiModels, [job.sku]: e.target.value})}
                                            placeholder="provider/model-id"
-                                           aria-label={`Custom AI model for ${job.sku}`}
-                                           className="h-[26px] w-44 rounded border border-white/10 bg-white/5 px-2 py-1 text-[9px] font-mono text-white/70 outline-none transition-all placeholder:text-white/25 focus:border-white/20"
+                                          aria-label={`Custom AI model for ${job.sku}`}
+                                          className="h-[30px] w-44 rounded-md border border-stone-300 bg-white px-2 py-1 text-xs font-mono text-slate-700 outline-none transition-all placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                                          />
                                        )}
                                        <button aria-label={`Run AI mapping for ${job.sku}`} onClick={async () => {
@@ -3946,9 +4229,10 @@ export default function App() {
                                             addLog('success', `SKU ${job.sku} mapping cycle complete.`);
                                             fetchJobs();
                                           } catch (e: any) { addLog('error', `Mapping failed for ${job.sku}: ${e.message}`); }
-                                       }} className="px-4 py-1.5 h-[26px] bg-blue-600 hover:bg-blue-500 rounded text-[10px] font-bold uppercase tracking-widest text-white shadow-lg transition-all active:scale-95 flex items-center">MAP AI</button>
+                                       }} className="flex h-[30px] items-center rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-blue-700">Map AI</button>
                                      </div>
                                   ))}
+                                 </div>
                               </div>
                            </div>
                         )})}
@@ -3962,61 +4246,274 @@ export default function App() {
                         )}
                      </div>
                      {jobsHasMore && (
-                       <div className="flex justify-center py-3 border-t border-white/5">
+                       <div className="flex justify-center border-t border-stone-200 py-3">
                          <Button
                            onClick={() => fetchJobs({ cursor: jobsNextCursor ?? undefined, append: true })}
                            variant="secondary"
                            size="sm"
                          >
-                           LOAD MORE
+                           Load more
                          </Button>
                        </div>
                      )}
                   </div>
                </div>
-             ) : currentModule === 'sku-indexer' ? (
-               <div className="flex-1 flex flex-col gap-6">
-                  <div className="responsive-toolbar">
-                    <div>
-                      <h2 className="text-2xl font-bold tracking-tight">SKU Master Pulse</h2>
-                      <p className="text-[11px] text-white/40 uppercase tracking-widest mt-1">Currently governing {skuIndex.length} product records in local memory</p>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 overflow-y-auto custom-scrollbar flex-1 pb-10">
-                     {skuIndex.map((sku, i) => {
-                        const skuAttributeSet = readSkuAttributeSetForDisplay(sku);
-                        return (
-                        <div key={i} className="p-5 rounded-2xl border border-white/5 bg-black/40 hover:border-blue-500/20 transition-all group relative overflow-hidden">
-                           <div className="absolute top-0 right-0 p-3 opacity-0 group-hover:opacity-100 transition-opacity"><Zap className="w-4 h-4 text-blue-500/40" /></div>
-                           <div className="px-2 py-1 bg-blue-600/10 border border-blue-500/20 rounded text-[10px] font-mono text-blue-400 font-bold mb-3 inline-block">{sku.sku || sku.SKU}</div>
-                           <div className="text-xs font-bold text-white/90 line-clamp-2 min-h-[32px] leading-relaxed italic">{sku.title || sku.Name || 'Unlabeled Record'}</div>
-                           <div className="mt-4 pt-4 border-t border-white/[0.03] grid grid-cols-2 gap-2">
-                              <div className="flex flex-col"><span className="text-[8px] text-white/20 uppercase font-bold">Category</span><span className="text-[10px] text-white/70 truncate">{sku.category || 'N/A'}</span></div>
-                              <div className="flex flex-col"><span className="text-[8px] text-white/20 uppercase font-bold">Protocol</span><span className="text-[10px] text-blue-400 font-bold truncate uppercase">{skuAttributeSet || 'DEFAULT'}</span></div>
-                              <div className="flex flex-col"><span className="text-[8px] text-white/20 uppercase font-bold">Brand</span><span className="text-[10px] text-white/70 truncate">{sku.brand || 'N/A'}</span></div>
+             ) : currentModule === 'review' ? (
+               <div className="mx-auto grid w-full max-w-7xl flex-1 gap-6 lg:grid-cols-[340px_1fr]">
+                 <Card className="flex min-h-0 flex-col overflow-hidden p-0">
+                   <div className="border-b border-stone-200 p-4">
+                     <h2 className="text-base font-semibold text-slate-950">SKU Review</h2>
+                     <p className="mt-1 text-sm text-slate-500">Select a SKU to inspect source context, output, and timeline.</p>
+                   </div>
+                   <div className="flex-1 overflow-y-auto p-2 custom-scrollbar">
+                     {jobs.map((job) => {
+                       const active = selectedReviewJob?.sku === job.sku;
+                       return (
+                         <button
+                           key={job.sku}
+                           type="button"
+                           onClick={() => setReviewSku(job.sku)}
+                           className={`mb-2 w-full rounded-lg border p-3 text-left transition-colors ${active ? 'border-blue-200 bg-blue-50' : 'border-stone-200 bg-white hover:border-blue-200 hover:bg-blue-50/50'}`}
+                         >
+                           <div className="flex items-start justify-between gap-3">
+                             <div className="min-w-0">
+                               <div className="font-mono text-sm font-semibold text-blue-700">{job.sku}</div>
+                               <div className="mt-1 truncate text-sm text-slate-600">{job.title || 'Unknown product'}</div>
+                             </div>
+                             <Badge tone={job.status === 'completed' ? 'green' : job.status === 'failed' ? 'red' : job.status === 'ready' ? 'blue' : 'neutral'}>{job.status}</Badge>
                            </div>
-                        </div>
-                     )})}
-                     {skuIndex.length === 0 && (
+                         </button>
+                       );
+                     })}
+                     {jobs.length === 0 && (
                        <EmptyState
-                         icon={<Database className="h-8 w-8" />}
-                         title="Awaiting master index"
-                         description="Upload an XLSX master index or add a SKU manually to start building the catalogue."
-                         className="col-span-full"
+                         icon={<Briefcase className="h-8 w-8" />}
+                         title="No SKUs to review"
+                         description="Upload catalogue data and sync jobs first."
+                         className="m-2"
                        />
                      )}
+                   </div>
+                 </Card>
+
+                 {selectedReviewJob ? (
+                   <div className="flex min-w-0 flex-col gap-6">
+                     <div className="responsive-toolbar">
+                       <div>
+                         <h2 className="text-2xl font-semibold tracking-tight text-slate-950">{selectedReviewJob.sku}</h2>
+                         <p className="mt-1 text-sm text-slate-500">{selectedReviewJob.title || 'SKU inspection workspace'}</p>
+                       </div>
+                       <div className="responsive-actions">
+                         <Button onClick={() => setCurrentModule('jobs')} variant="secondary">Back to jobs</Button>
+                         {selectedReviewJob.status === 'completed' && (
+                           <Button onClick={() => fetchOutput(selectedReviewJob.sku)}>Open output</Button>
+                         )}
+                       </div>
+                     </div>
+
+                     <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+                       <Card className="p-4"><div className="text-xs text-slate-500">Status</div><div className="mt-2"><Badge tone={selectedReviewJob.status === 'completed' ? 'green' : selectedReviewJob.status === 'failed' ? 'red' : selectedReviewJob.status === 'ready' ? 'blue' : 'neutral'}>{selectedReviewJob.status}</Badge></div></Card>
+                       <Card className="p-4"><div className="text-xs text-slate-500">Attribute set</div><div className="mt-2 text-sm font-semibold text-slate-950">{readSkuAttributeSetForDisplay(selectedReviewJob) || 'Default'}</div></Card>
+                       <Card className="p-4"><div className="text-xs text-slate-500">Retry count</div><div className="mt-2 text-2xl font-semibold text-slate-950">{(selectedReviewJob as any).retryCount ?? 0}</div></Card>
+                       <Card className="p-4"><div className="text-xs text-slate-500">Output</div><div className="mt-2"><Badge tone={selectedReviewJob.status === 'completed' ? 'green' : 'neutral'}>{selectedReviewJob.status === 'completed' ? 'Available' : 'Not ready'}</Badge></div></Card>
+                     </div>
+
+                     <div className="grid grid-cols-1 gap-6 xl:grid-cols-2">
+                       <Card className="p-5">
+                         <h3 className="text-base font-semibold text-slate-950">Source context</h3>
+                         <div className="mt-4 flex flex-wrap gap-2">
+                           {selectedReviewJob.hasSapData || (selectedReviewRecord && hasSapSource(selectedReviewRecord)) ? <Badge tone="amber">SAP truth source</Badge> : null}
+                           {selectedReviewJob.hasPdf || selectedReviewRecord?.pdf_text ? <Badge tone="blue">PDF context</Badge> : null}
+                           {selectedReviewJob.harvestFile ? <Badge tone="green">Scraped harvest</Badge> : null}
+                           {!selectedReviewJob.hasSapData && !selectedReviewJob.hasPdf && !selectedReviewJob.harvestFile && <Badge tone="neutral">No linked source</Badge>}
+                         </div>
+                         <div className="mt-5 flex flex-wrap gap-2">
+                           {selectedReviewJob.harvestFile && (
+                             <Button onClick={() => openHarvestFile(selectedReviewJob.harvestFile!, 'sku review harvest')} variant="secondary" size="sm">
+                               <FileText className="h-3.5 w-3.5" /> Scraped markdown
+                             </Button>
+                           )}
+                           {selectedReviewJob.hasPdf && (
+                             <Button onClick={() => handleViewPdf(selectedReviewJob.sku)} variant="secondary" size="sm">
+                               <FileText className="h-3.5 w-3.5" /> PDF text
+                             </Button>
+                           )}
+                           {selectedReviewJob.status === 'completed' && (
+                             <Button onClick={() => fetchOutput(selectedReviewJob.sku)} variant="secondary" size="sm">
+                               <Eye className="h-3.5 w-3.5" /> QA result JSON
+                             </Button>
+                           )}
+                         </div>
+                       </Card>
+
+                       <Card className="p-5">
+                         <h3 className="text-base font-semibold text-slate-950">Timeline logs</h3>
+                         <div className="mt-4 max-h-56 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-xs text-slate-200 custom-scrollbar">
+                           {selectedReviewLogs.length > 0 ? selectedReviewLogs.map((log, i) => (
+                             <div key={`${log.timestamp}-${i}`} className="mb-2 last:mb-0">
+                               <span className="text-slate-500">{log.timestamp}</span> <span>{log.message}</span>
+                             </div>
+                           )) : (
+                             <div className="text-slate-500">No timeline entries found for this SKU in current logs.</div>
+                           )}
+                         </div>
+                       </Card>
+                     </div>
+
+                     <Card className="overflow-hidden p-0">
+                       <div className="border-b border-stone-200 px-5 py-4">
+                         <h3 className="text-base font-semibold text-slate-950">Uploaded SKU JSON</h3>
+                         <p className="mt-1 text-sm text-slate-500">Raw uploaded/indexed record for this SKU.</p>
+                       </div>
+                       <pre className="max-h-96 overflow-auto bg-slate-950 p-5 text-xs leading-relaxed text-slate-100 custom-scrollbar">{JSON.stringify(selectedReviewRecord || selectedReviewJob, null, 2)}</pre>
+                     </Card>
+                   </div>
+                 ) : null}
+               </div>
+             ) : currentModule === 'upload' ? (
+               <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6">
+                  <div className="responsive-toolbar">
+                    <div>
+                      <h2 className="text-2xl font-semibold tracking-tight text-slate-950">Import catalogue data</h2>
+                      <p className="mt-1 text-sm text-slate-500">Upload Excel, confirm source coverage, then move into Pre-QA checks.</p>
+                    </div>
+                    <Button onClick={() => setCurrentModule('pre-qa')} disabled={uploadedSkuCount === 0}>
+                      Open Pre-QA
+                    </Button>
                   </div>
+
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+                    {[
+                      ['Uploaded SKUs', uploadedSkuCount, 'Rows currently indexed'],
+                      ['attributes__ fields', uploadedAttributeFields.size, 'Detected in uploaded records'],
+                      ['SAP truth source', sapSourceCount, 'Rows with sap_data/source SAP'],
+                      ['Source/PDF context', urlSourceCount + batchData.length + pdfSourceCount, 'URLs and attached PDF rows'],
+                    ].map(([label, value, help]) => (
+                      <Card key={label as string} className="p-4">
+                        <div className="text-sm font-medium text-slate-500">{label}</div>
+                        <div className="mt-2 text-3xl font-semibold text-slate-950">{value}</div>
+                        <div className="mt-1 text-xs text-slate-500">{help}</div>
+                      </Card>
+                    ))}
+                  </div>
+
+                  {uploadedSkuCount === 0 ? (
+                    <EmptyState
+                      icon={<FileSpreadsheet className="h-8 w-8" />}
+                      title="No catalogue uploaded yet"
+                      description="Use the import panel to upload the SKU master XLSX or create a manual SKU. Pre-QA will populate from real indexed data."
+                    />
+                  ) : (
+                    <Card className="overflow-hidden p-0">
+                      <div className="border-b border-stone-200 px-5 py-4">
+                        <h3 className="text-base font-semibold text-slate-950">Recent indexed SKUs</h3>
+                        <p className="mt-1 text-sm text-slate-500">Showing up to 12 records from the current master index.</p>
+                      </div>
+                      <div className="divide-y divide-stone-100">
+                        {skuRecords.slice(0, 12).map((sku, i) => {
+                          const skuValue = (sku.sku || sku.SKU || `SKU-${i + 1}`).toString();
+                          const skuAttributeSet = readSkuAttributeSetForDisplay(sku);
+                          return (
+                            <div key={`${skuValue}-${i}`} className="grid gap-3 px-5 py-4 md:grid-cols-[1.2fr_1fr_1fr_1fr] md:items-center">
+                              <div>
+                                <div className="font-mono text-sm font-semibold text-blue-700">{skuValue}</div>
+                                <div className="mt-1 text-sm text-slate-500">{sku.title || sku.Name || sku.brand || sku.Brand || 'Unlabeled record'}</div>
+                              </div>
+                              <Badge tone={skuAttributeSet ? 'blue' : 'neutral'}>{skuAttributeSet || 'Default attribute set'}</Badge>
+                              <div className="flex flex-wrap gap-2">
+                                {hasSapSource(sku) ? <Badge tone="amber">SAP truth</Badge> : null}
+                                {sku.pdf_text ? <Badge tone="blue">PDF</Badge> : null}
+                                {hasHarvestSource(sku) ? <Badge tone="green">Harvest</Badge> : null}
+                                {hasUrlSource(sku) ? <Badge tone="neutral">URL</Badge> : null}
+                              </div>
+                              <div className="text-sm text-slate-500">{sku.product_type || sku.category || 'Uncategorized'}</div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </Card>
+                  )}
+               </div>
+             ) : currentModule === 'pre-qa' ? (
+               <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6">
+                  <div className="responsive-toolbar">
+                    <div>
+                      <h2 className="text-2xl font-semibold tracking-tight text-slate-950">Pre-QA readiness dashboard</h2>
+                      <p className="mt-1 text-sm text-slate-500">Review source coverage before scraping, mapping, reviewing, and exporting.</p>
+                    </div>
+                    <div className="responsive-actions">
+                      <Button onClick={() => setCurrentModule('upload')} variant="secondary">Upload data</Button>
+                      <Button onClick={() => setCurrentModule('scrapper')} disabled={uploadedSkuCount === 0}>Continue</Button>
+                    </div>
+                  </div>
+
+                  <Card className="p-4">
+                    <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+                      {workflowSteps.map((step, index) => (
+                        <div key={step} className="rounded-lg border border-stone-200 bg-stone-50 p-3">
+                          <div className="flex items-center gap-2">
+                            <div className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${index <= 1 ? 'bg-blue-600 text-white' : 'bg-white text-slate-500 ring-1 ring-stone-200'}`}>
+                              {index + 1}
+                            </div>
+                            <div className="text-sm font-medium text-slate-900">{step}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {[
+                      ['Ready for QA', sourceReadyCount, 'SKUs with usable SAP, PDF, or scraped source data', 'blue'],
+                      ['Missing source', missingSourceCount, 'No SAP, PDF, or harvested scrape currently attached', 'amber'],
+                      ['Has SAP/source data', sapSourceCount, 'SAP is displayed as the truth source', 'amber'],
+                      ['Has scraped/harvest data', harvestSourceCount, 'Harvest markdown available for SKU', 'green'],
+                      ['Completed outputs', completedJobCount, 'QA result JSON already exists', 'green'],
+                      ['Failed or pending items', failedJobCount + pendingJobCount, 'Needs attention before export', failedJobCount > 0 ? 'red' : 'neutral'],
+                    ].map(([label, value, help, tone]) => (
+                      <Card key={label as string} className="p-5">
+                        <Badge tone={tone as any}>{label}</Badge>
+                        <div className="mt-4 text-3xl font-semibold text-slate-950">{value}</div>
+                        <div className="mt-1 text-sm text-slate-500">{help}</div>
+                      </Card>
+                    ))}
+                  </div>
+
+                  {uploadedSkuCount === 0 ? (
+                    <EmptyState
+                      icon={<AlertCircle className="h-8 w-8" />}
+                      title="Pre-QA needs catalogue data"
+                      description="Upload an XLSX master index or create a manual SKU first. This dashboard only uses real app state."
+                      action={<Button onClick={() => setCurrentModule('upload')}>Go to Upload</Button>}
+                    />
+                  ) : missingSourceCount > 0 ? (
+                    <Alert tone="warning">Some SKUs are missing SAP, PDF, or scraped harvest context. Add SAP data, attach PDFs, or run scraping before mapping those SKUs.</Alert>
+                  ) : (
+                    <Alert tone="success">Current uploaded SKUs have at least one usable source. SAP data remains the highest-priority truth source during mapping.</Alert>
+                  )}
                </div>
              ) : currentModule === 'images' ? (
-               <div className="flex-1 flex flex-col gap-6 max-w-5xl mx-auto w-full pb-10">
-                  <div className="flex items-end justify-between">
+               <div className="sources-saas flex-1 flex flex-col gap-6 max-w-6xl mx-auto w-full pb-10">
+                  <div className="responsive-toolbar">
                     <div>
-                      <h2 className="text-2xl font-bold tracking-tight">Image Sourcer</h2>
-                      <p className="text-[11px] text-white/40 uppercase tracking-widest mt-1">High-fidelity image extraction and formatting engine</p>
+                      <h2 className="text-2xl font-semibold tracking-tight text-slate-950">Sources</h2>
+                      <p className="mt-1 text-sm text-slate-500">Load harvest files, extract image URLs, select assets, and export formatted images.</p>
+                    </div>
+                    <div className="responsive-actions">
+                      <Button onClick={fetchHarvest} variant="secondary" size="sm">
+                        <RefreshCw className="h-3.5 w-3.5" /> Sync harvest files
+                      </Button>
+                      <Button onClick={() => setCurrentModule('scrapper')} variant="secondary" size="sm">
+                        <Cpu className="h-3.5 w-3.5" /> Run scrape
+                      </Button>
                     </div>
                   </div>
 
                   <Card className="space-y-6">
+                    <div>
+                      <h3 className="text-base font-semibold text-slate-950">Image URL extraction</h3>
+                      <p className="mt-1 text-sm text-slate-500">Extract from a direct product URL or load URLs from saved markdown harvest files.</p>
+                    </div>
                     <div className="grid grid-cols-1 gap-4 items-end lg:grid-cols-[1fr_2fr_auto]">
                         <Input
                           type="text"
@@ -4039,7 +4536,7 @@ export default function App() {
                       <Button
                         onClick={handleImageExtract}
                         disabled={isExtractingImage || !imageUrl || !imageSku}
-                        className="h-[46px] bg-cyan-600 hover:bg-cyan-500"
+                        className="h-[46px]"
                       >
                         {isExtractingImage ? <><Loader2 className="w-4 h-4 animate-spin" /> Extracting</> : <><ImageIcon className="w-4 h-4" /> Source Image</>}
                       </Button>
@@ -4050,10 +4547,10 @@ export default function App() {
                          id="imageScreenshotEnable"
                          checked={imageScreenshotEnabled}
                          onChange={(e) => setImageScreenshotEnabled(e.target.checked)}
-                         className="rounded bg-white/10 border-white/20 text-cyan-500 focus:ring-cyan-500/20"
+                         className="rounded border-stone-300 text-blue-600 focus:ring-blue-500/20"
                        />
-                       <label htmlFor="imageScreenshotEnable" className="text-[10px] text-white/60 uppercase font-bold tracking-widest cursor-pointer">
-                         Enable Full Page Screenshot (Debug)
+                       <label htmlFor="imageScreenshotEnable" className="cursor-pointer text-sm text-slate-600">
+                         Capture full page screenshot for debugging
                        </label>
                     </div>
                   </Card>
@@ -4061,17 +4558,17 @@ export default function App() {
                   <div className="dashboard-card space-y-4 p-5">
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                       <div>
-                        <h3 className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">Load from Harvest File</h3>
-                        <p className="text-[11px] text-white/45 mt-1">Each sku.md file is listed separately. Select one file to show only that harvest file&apos;s image URLs.</p>
+                        <h3 className="text-base font-semibold text-slate-950">Harvest archive</h3>
+                        <p className="mt-1 text-sm text-slate-500">Each saved markdown file is listed separately. Select one to show that file&apos;s image URLs.</p>
                       </div>
                     </div>
                     {selectedHarvestSource && (
-                      <div className="rounded-2xl border border-emerald-500/20 bg-black/30 px-4 py-3 flex items-center justify-between gap-3">
+                      <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 flex items-center justify-between gap-3">
                         <div>
-                          <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">Active Harvest File</div>
-                          <div className="text-xs font-mono text-white/75 mt-1">{selectedHarvestSource.filename}</div>
+                          <div className="text-xs font-medium text-emerald-700">Active harvest file</div>
+                          <div className="mt-1 font-mono text-xs text-slate-700">{selectedHarvestSource.filename}</div>
                         </div>
-                        <div className="text-[10px] text-white/45 uppercase tracking-widest">
+                        <div className="text-xs text-emerald-700">
                           {selectedHarvestSource.urls.length} URLS • EXPORT AS {selectedHarvestSource.sku}-1.jpg
                         </div>
                       </div>
@@ -4087,31 +4584,45 @@ export default function App() {
                         {harvestFiles.map((file: any, idx: number) => {
                           const isActive = selectedHarvestSource?.filename === file.name;
                           return (
-                            <button
+                            <div
                               key={idx}
-                              type="button"
-                              onClick={() => loadHarvestFile(file.name)}
-                              disabled={loadingHarvestFile}
-                              className={`rounded-2xl border px-4 py-3 text-left transition-all ${isActive ? 'border-emerald-400 bg-emerald-500/10 ring-2 ring-emerald-400/20' : 'border-white/10 bg-black/30 hover:border-emerald-500/30'} ${loadingHarvestFile ? 'opacity-60 cursor-not-allowed' : ''}`}
+                              className={`rounded-lg border px-4 py-3 text-left transition-all ${isActive ? 'border-emerald-300 bg-emerald-50 ring-2 ring-emerald-100' : 'border-stone-200 bg-white hover:border-emerald-300 hover:bg-emerald-50/50'} ${loadingHarvestFile ? 'opacity-60 cursor-not-allowed' : ''}`}
                             >
-                              <div className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">{deriveHarvestSku(file.name)}</div>
-                              <div className="text-xs font-mono text-white/75 truncate mt-2">{file.name}</div>
-                              <div className="text-[10px] text-white/30 uppercase tracking-tight mt-2">{(file.size / 1024).toFixed(1)} KB</div>
-                            </button>
+                              <div className="text-xs font-semibold text-emerald-700">{deriveHarvestSku(file.name)}</div>
+                              <div className="mt-2 truncate font-mono text-xs text-slate-700">{file.name}</div>
+                              <div className="mt-2 text-xs text-slate-500">{(file.size / 1024).toFixed(1)} KB</div>
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <Button
+                                  onClick={() => loadHarvestFile(file.name)}
+                                  disabled={loadingHarvestFile}
+                                  variant="secondary"
+                                  size="sm"
+                                >
+                                  Load images
+                                </Button>
+                                <Button
+                                  onClick={() => openHarvestFile(file.name, 'sources harvest')}
+                                  variant="secondary"
+                                  size="sm"
+                                >
+                                  Open markdown
+                                </Button>
+                              </div>
+                            </div>
                           );
                         })}
                       </div>
                     )}
                   </div>
 
-                  <div className="rounded-3xl border border-cyan-500/20 bg-cyan-500/5 p-5 space-y-4">
+                  <div className="rounded-lg border border-stone-200 bg-white p-5 space-y-4 shadow-sm">
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                       <div>
-                        <h3 className="text-[10px] font-bold uppercase tracking-widest text-cyan-300">Scraped Image URLs</h3>
-                        <p className="text-[11px] text-white/45 mt-1">{selectedHarvestSource ? `Showing URL-only output for ${selectedHarvestSource.filename}.` : 'Select up to 10 image URLs from the current scrape output or a harvested sku.md file. Export happens locally and does not touch Firebase.'}</p>
+                        <h3 className="text-base font-semibold text-slate-950">Scraped image URLs</h3>
+                        <p className="mt-1 text-sm text-slate-500">{selectedHarvestSource ? `Showing URL-only output for ${selectedHarvestSource.filename}.` : 'Select up to 10 image URLs from the current scrape output or a harvested markdown file.'}</p>
                       </div>
                       <div className="flex flex-wrap items-center gap-3">
-                        <span className="px-3 py-1 rounded-full border border-white/10 bg-black/40 text-[10px] font-bold text-white/60 uppercase tracking-widest">
+                        <span className="rounded-full border border-stone-200 bg-stone-50 px-3 py-1 text-xs font-medium text-slate-600">
                           {selectedImageUrls.length}/10 selected
                         </span>
                         <Button
@@ -4125,7 +4636,6 @@ export default function App() {
                         <Button
                           onClick={exportSelectedImages}
                           disabled={selectedImageUrls.length === 0 || isExportingImages}
-                          className="bg-cyan-600 hover:bg-cyan-500"
                           size="sm"
                         >
                           {isExportingImages ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Exporting...</> : `Export Selected (${selectedImageUrls.length})`}
@@ -4153,10 +4663,10 @@ export default function App() {
                               type="button"
                               onClick={() => toggleImageSelection(src)}
                               disabled={isDisabled}
-                              className={`w-full text-left rounded-2xl border transition-all overflow-hidden group ${isSelected ? 'border-cyan-400 bg-cyan-500/10 ring-2 ring-cyan-400/30' : 'border-white/10 bg-black/40 hover:border-white/20'} ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}`}
+                              className={`w-full text-left rounded-lg border transition-all overflow-hidden group ${isSelected ? 'border-blue-300 bg-blue-50 ring-2 ring-blue-100' : 'border-stone-200 bg-white hover:border-blue-200 hover:bg-blue-50/40'} ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}`}
                             >
                               <div className="p-4 flex items-start gap-4">
-                                <div className="relative shrink-0 w-20 h-20 rounded-xl overflow-hidden border border-white/10 bg-black/40">
+                                <div className="relative shrink-0 w-20 h-20 rounded-lg overflow-hidden border border-stone-200 bg-stone-50">
                                   <img
                                     src={src}
                                     alt={`${exportSku}-${index + 1}`}
@@ -4175,16 +4685,16 @@ export default function App() {
                                     <ImageIcon className="w-5 h-5" />
                                   </div>
                                 </div>
-                                <div className="shrink-0 px-3 py-2 rounded-xl bg-black/40 border border-white/10 text-[10px] font-bold uppercase tracking-widest text-cyan-200">
+                                <div className="shrink-0 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs font-medium text-slate-600">
                                   {exportSku}-{index + 1}.jpg
                                 </div>
                                 <div className="min-w-0 flex-1">
-                                  <div className="text-[10px] font-bold uppercase tracking-widest text-white/35 mb-2">
+                                  <div className="mb-2 text-xs font-medium text-slate-500">
                                     {selectedHarvestSource ? selectedHarvestSource.filename : 'Current scrape session'}
                                   </div>
-                                  <div className="text-[11px] font-mono text-white/75 break-all leading-relaxed">{src}</div>
+                                  <div className="break-all font-mono text-xs leading-relaxed text-slate-700">{src}</div>
                                 </div>
-                                <div className={`shrink-0 w-7 h-7 rounded-full border flex items-center justify-center transition-colors ${isSelected ? 'bg-cyan-500 border-cyan-300 text-white' : 'bg-black/70 border-white/20 text-white/30 group-hover:text-white/60'}`}>
+                                <div className={`shrink-0 w-7 h-7 rounded-full border flex items-center justify-center transition-colors ${isSelected ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-stone-300 text-slate-300 group-hover:text-blue-600'}`}>
                                   {isSelected && <Check className="w-4 h-4" />}
                                 </div>
                               </div>
@@ -4196,7 +4706,7 @@ export default function App() {
                   </div>
 
                   <div className="space-y-4 flex-1">
-                    <h3 className="text-[10px] font-bold uppercase tracking-widest text-white/40">Extracted Assets ({extractedImages.length})</h3>
+                    <h3 className="text-base font-semibold text-slate-950">Extracted assets ({extractedImages.length})</h3>
                     {extractedImages.length === 0 ? (
                       <EmptyState
                         icon={<ImageIcon className="h-8 w-8" />}
@@ -4207,31 +4717,31 @@ export default function App() {
                     ) : (
                       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-6">
                         {extractedImages.map((img, i) => (
-                           <div key={i} className="rounded-2xl border border-white/10 bg-black/40 overflow-hidden group relative">
+                           <div key={i} className="relative overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm group">
                              <div className="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
                                <button 
                                  onClick={() => handleImageDelete(img.sku)}
-                                 className="w-8 h-8 bg-red-500/20 hover:bg-red-500 text-red-300 hover:text-white rounded-lg flex items-center justify-center transition-colors"
+                                 className="flex h-8 w-8 items-center justify-center rounded-lg bg-red-50 text-red-700 transition-colors hover:bg-red-600 hover:text-white"
                                  title="Delete Image"
                                >
                                   <Trash2 className="w-4 h-4" />
                                </button>
                              </div>
                              {img.imagePath ? (
-                               <div className="aspect-square bg-white flex items-center justify-center relative p-4">
+                               <div className="relative flex aspect-square items-center justify-center bg-white p-4">
                                  <img src={img.imagePath} alt={img.sku} className="max-w-full max-h-full object-contain" />
                                  <div className="absolute inset-0 bg-black/80 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                                   <a href={img.imagePath} download={`${img.sku}.jpg`} className="px-4 py-2 bg-blue-600 text-white text-xs font-bold uppercase tracking-wider rounded-lg hover:bg-blue-500 transition-colors">Download Format</a>
+                                   <a href={img.imagePath} download={`${img.sku}.jpg`} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700">Download image</a>
                                  </div>
                                </div>
                              ) : (
-                               <div className="aspect-square bg-[#0a0a0a] flex items-center justify-center relative p-4 text-center">
-                                  <span className="text-white/20 text-[10px] uppercase font-bold">Image Failed to Process</span>
+                               <div className="relative flex aspect-square items-center justify-center bg-stone-50 p-4 text-center">
+                                  <span className="text-xs font-medium text-slate-500">Image failed to process</span>
                                </div>
                              )}
-                             <div className="p-4 border-t border-white/10 flex flex-col gap-1">
-                               <span className="text-[10px] font-mono text-blue-400 font-bold">{img.sku}</span>
-                               <a href={img.originalUrl} target="_blank" rel="noopener noreferrer" className="text-[9px] text-white/40 hover:text-white/80 truncate">Original Source</a>
+                             <div className="flex flex-col gap-1 border-t border-stone-200 p-4">
+                               <span className="font-mono text-xs font-semibold text-blue-700">{img.sku}</span>
+                               <a href={img.originalUrl} target="_blank" rel="noopener noreferrer" className="truncate text-xs text-slate-500 hover:text-slate-900">Original source</a>
                                {img.screenshotPath && (
                                  <a href={img.screenshotPath} target="_blank" rel="noopener noreferrer" className="text-[9px] text-cyan-400 hover:text-cyan-300 truncate inline-flex items-center gap-1 mt-1">
                                    <Eye className="w-3 h-3" /> View Debug Screenshot
@@ -4318,30 +4828,30 @@ export default function App() {
       {/* FLOATING OVERLAYS - RELOCATED FOR LAYOUT STABILITY */}
       <AnimatePresence>
         {isScreenshotExpanded && currentScreenshot && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 md:p-10 bg-black/90 backdrop-blur-sm" onClick={() => setIsScreenshotExpanded(false)}>
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm sm:p-6 md:p-10" onClick={() => setIsScreenshotExpanded(false)}>
             <motion.div 
               initial={{ opacity: 0, scale: 0.95, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-4xl h-[85vh] bg-[#0d0d0d] border border-white/10 rounded-2xl shadow-2xl flex flex-col overflow-hidden"
+              className="relative flex h-[85vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-stone-200 bg-white shadow-2xl"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="h-16 border-b border-white/10 flex items-center justify-between px-6 bg-white/[0.02] shrink-0">
+              <div className="flex h-16 shrink-0 items-center justify-between border-b border-stone-200 bg-white px-6">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 bg-purple-500/20 rounded-lg text-purple-400">
+                  <div className="rounded-lg bg-blue-50 p-2 text-blue-700">
                     <Activity className="w-5 h-5" />
                   </div>
                   <div>
-                    <h2 className="text-sm font-bold text-white tracking-tight">Visual Verification Snapshot</h2>
-                    <p className="text-[10px] text-white/30 font-mono uppercase tracking-widest">{url}</p>
+                    <h2 className="text-base font-semibold text-slate-950">Visual verification snapshot</h2>
+                    <p className="mt-1 truncate font-mono text-xs text-slate-500">{url}</p>
                   </div>
                 </div>
                 <button 
                   onClick={() => setIsScreenshotExpanded(false)}
                   aria-label="Close screenshot preview"
-                  className="p-3 hover:bg-red-500/20 rounded-xl transition-colors text-white/30 hover:text-red-500 group"
+                  className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-stone-100 hover:text-slate-700"
                 >
-                  <X className="w-5 h-5 group-hover:rotate-90 transition-transform" />
+                  <X className="w-5 h-5" />
                 </button>
               </div>
               <div className="flex-1 overflow-auto bg-black p-4 flex items-start justify-center">
@@ -4460,26 +4970,26 @@ export default function App() {
           </div>
         )}
         {viewingPdfContent && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/80 backdrop-blur-md text-white">
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/70 p-6 backdrop-blur-md">
             <motion.div 
                initial={{ opacity: 0, scale: 0.9 }} 
                animate={{ opacity: 1, scale: 1 }} 
-               className="w-full max-w-4xl max-h-[80vh] bg-[#0a0a0a] border border-white/10 rounded-[32px] overflow-hidden flex flex-col shadow-2xl"
+               className="flex max-h-[80vh] w-full max-w-4xl flex-col overflow-hidden rounded-lg border border-stone-200 bg-white shadow-2xl"
             >
-              <div className="h-16 border-b border-white/10 flex items-center px-8 justify-between shrink-0">
+              <div className="flex h-16 shrink-0 items-center justify-between border-b border-stone-200 px-6">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-purple-500/10 text-purple-400"><FileText className="w-5 h-5" /></div>
+                  <div className="rounded-lg bg-blue-50 p-2 text-blue-700"><FileText className="w-5 h-5" /></div>
                   <div>
-                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Extracted PDF Text</h3>
-                    <p className="text-[10px] text-white/30 font-mono">SKU: {viewingPdfSku}</p>
+                    <h3 className="text-base font-semibold text-slate-950">Extracted PDF text</h3>
+                    <p className="mt-1 font-mono text-xs text-slate-500">SKU: {viewingPdfSku}</p>
                   </div>
                 </div>
-                <button onClick={() => { setViewingPdfContent(null); setViewingPdfSku(null); }} aria-label="Close PDF text modal" className="p-2 rounded-full hover:bg-white/5 transition-all outline-none">
-                  <X className="w-5 h-5 text-white/40" />
+                <button onClick={() => { setViewingPdfContent(null); setViewingPdfSku(null); }} aria-label="Close PDF text modal" className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-stone-100 hover:text-slate-700">
+                  <X className="w-5 h-5" />
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
-                <div className="bg-white/5 border border-white/10 rounded-2xl p-6 whitespace-pre-wrap font-mono text-[11px] text-white/70 leading-relaxed max-w-full overflow-x-hidden">
+                <div className="max-w-full overflow-x-hidden whitespace-pre-wrap rounded-lg border border-slate-800 bg-slate-950 p-6 font-mono text-xs leading-relaxed text-slate-100">
                   {viewingPdfContent}
                 </div>
               </div>
@@ -4487,26 +4997,26 @@ export default function App() {
           </div>
         )}
         {viewingOutput && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-black/80 backdrop-blur-md text-white">
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-md sm:p-6">
             <motion.div 
                initial={{ opacity: 0, scale: 0.9 }} 
                animate={{ opacity: 1, scale: 1 }} 
-               className="w-full max-w-4xl max-h-[80vh] bg-[#0a0a0a] border border-white/10 rounded-[32px] overflow-hidden flex flex-col shadow-2xl"
+               className="flex max-h-[84vh] w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-stone-200 bg-white shadow-2xl"
             >
-              <div className="h-16 border-b border-white/10 flex items-center px-8 justify-between">
+              <div className="flex min-h-16 items-center justify-between border-b border-stone-200 px-6 py-4">
                 <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400"><FileText className="w-5 h-5" /></div>
+                  <div className="rounded-lg bg-blue-50 p-2 text-blue-700"><FileText className="w-5 h-5" /></div>
                   <div>
-                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Edit Job Outcome</h3>
-                    <p className="text-[10px] text-white/30 font-mono">SKU: {editingOutputSku}</p>
+                    <h3 className="text-base font-semibold text-slate-950">QA result editor</h3>
+                    <p className="mt-1 font-mono text-xs text-slate-500">SKU: {editingOutputSku}</p>
                   </div>
                 </div>
-                <button onClick={() => setViewingOutput(null)} aria-label="Close output editor" className="p-2 rounded-full hover:bg-white/5 transition-all outline-none">
-                  <X className="w-5 h-5 text-white/40" />
+                <button onClick={() => setViewingOutput(null)} aria-label="Close output editor" className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-stone-100 hover:text-slate-700">
+                  <X className="w-5 h-5" />
                 </button>
               </div>
               
-              <div className="flex-1 overflow-y-auto p-8 custom-scrollbar grid grid-cols-1 gap-6 text-white">
+              <div className="grid flex-1 grid-cols-1 gap-5 overflow-y-auto p-6 custom-scrollbar">
                 {(() => {
                   const job = jobs.find(j => j.sku === editingOutputSku);
                   const attrSetName = (job?.attribute_set || job?.Attribute_Set || job?.schema || job?.Schema || '').toString();
@@ -4526,19 +5036,19 @@ export default function App() {
                   
                   return keys.map((key) => (
                     <div key={key} className="space-y-2 text-left">
-                      <label className="text-[10px] font-bold text-white/40 uppercase tracking-widest pl-1">{key.replace(/_/g, ' ')}</label>
+                      <label className="pl-1 text-xs font-medium text-slate-700">{key.replace(/_/g, ' ')}</label>
                       {((viewingOutput[key] as string | undefined)?.toString().length ?? 0) > 100 || key.toLowerCase().includes('description') || key.toLowerCase().includes('bullets') ? (
                          <textarea 
                            value={(viewingOutput[key] as string) || ''} 
                            onChange={(e) => setViewingOutput({...viewingOutput, [key]: e.target.value})}
-                           className="w-full bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/80 focus:border-blue-500/30 outline-none min-h-[120px] leading-relaxed transition-all"
+                           className="min-h-[120px] w-full rounded-lg border border-stone-300 bg-white p-3 text-sm leading-relaxed text-slate-900 outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                          />
                       ) : (
                          <input 
                            type="text" 
                            value={(viewingOutput[key] as string) || ''} 
                            onChange={(e) => setViewingOutput({...viewingOutput, [key]: e.target.value})}
-                           className="w-full bg-white/5 border border-white/10 rounded-xl p-4 text-xs text-white/80 focus:border-blue-500/30 outline-none transition-all"
+                           className="w-full rounded-lg border border-stone-300 bg-white p-3 text-sm text-slate-900 outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                          />
                       )}
                     </div>
@@ -4546,18 +5056,17 @@ export default function App() {
                 })()}
               </div>
 
-              <div className="h-20 border-t border-white/10 bg-white/[0.02] flex items-center px-8 justify-between">
-                <div className="flex items-center gap-2 text-[10px] text-white/20 uppercase font-bold tracking-widest">
-                  <div className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></div>
-                  Auto-syncing to Dispatch Hub
+              <div className="flex min-h-20 items-center justify-between gap-4 border-t border-stone-200 bg-stone-50 px-6 py-4">
+                <div className="text-sm text-slate-500">
+                  Edits save back to the existing output JSON for this SKU.
                 </div>
                 <button 
                   onClick={handleSaveOutput}
                   disabled={isSavingOutput}
-                  className="px-8 py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 rounded-full text-xs font-bold text-white transition-all flex items-center gap-3 shadow-lg shadow-blue-600/20"
+                  className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
                 >
                   {isSavingOutput ? <Loader2 className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
-                  PERSIST TO MASTER INDEX
+                  Save output
                 </button>
               </div>
             </motion.div>
@@ -4565,53 +5074,53 @@ export default function App() {
         )}
 
         {showHarvestModal && (
-          <div className="fixed inset-0 z-[110] flex items-center justify-center p-6 bg-black/90 backdrop-blur-md text-white">
+          <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/70 p-6 backdrop-blur-md">
             <motion.div 
                initial={{ opacity: 0, scale: 0.95 }} 
                animate={{ opacity: 1, scale: 1 }} 
-               className="w-full max-w-2xl bg-[#0a0a0a] border border-white/10 rounded-[32px] overflow-hidden flex flex-col shadow-2xl"
+               className="flex max-h-[82vh] w-full max-w-3xl flex-col overflow-hidden rounded-lg border border-stone-200 bg-white shadow-2xl"
             >
-              <div className="h-20 border-b border-white/10 flex items-center px-8 justify-between bg-white/[0.02]">
+              <div className="flex min-h-20 items-center justify-between border-b border-stone-200 bg-white px-6 py-4">
                 <div className="flex items-center gap-3">
-                  <div className="p-2.5 rounded-xl bg-blue-500/10 text-blue-400"><Archive className="w-6 h-6" /></div>
+                  <div className="rounded-lg bg-blue-50 p-2.5 text-blue-700"><Archive className="w-6 h-6" /></div>
                   <div>
-                    <h3 className="text-sm font-bold text-white uppercase tracking-widest">Harvest History</h3>
-                    <p className="text-[10px] text-white/30 font-mono uppercase">Indexed Data Assets</p>
+                    <h3 className="text-base font-semibold text-slate-950">Harvest archive</h3>
+                    <p className="mt-1 text-sm text-slate-500">Saved markdown source records</p>
                   </div>
                 </div>
-                <div className="flex items-center gap-4 text-white">
+                <div className="flex items-center gap-4">
                   <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-white/30" />
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
                     <input 
                       type="text"
                       placeholder="Search files..."
                       value={harvestSearch}
                       onChange={(e) => setHarvestSearch(e.target.value)}
-                      className="bg-white/5 border border-white/10 rounded-full pl-9 pr-4 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500/50 w-48 transition-all"
+                      className="w-48 rounded-md border border-stone-300 bg-white py-2 pl-9 pr-4 text-xs text-slate-900 outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                     />
                   </div>
-                  <button onClick={() => setShowHarvestModal(false)} aria-label="Close harvest history" className="p-2 rounded-full hover:bg-white/5 transition-all text-white/40 outline-none">
-                    <X className="w-5 h-5 text-white/40" />
+                  <button onClick={() => setShowHarvestModal(false)} aria-label="Close harvest history" className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-stone-100 hover:text-slate-700">
+                    <X className="w-5 h-5" />
                   </button>
                 </div>
               </div>
               
-              <div className="flex-1 overflow-y-auto p-8 custom-scrollbar max-h-[60vh] space-y-3">
+              <div className="flex-1 overflow-y-auto p-6 custom-scrollbar space-y-3">
                 {harvestFiles
                   .filter((f: any) => f.name.toLowerCase().includes(harvestSearch.toLowerCase()))
                   .map((file: any, idx: number) => (
-                    <div key={idx} className="p-4 bg-white/[0.03] border border-white/5 rounded-2xl flex items-center justify-between group hover:bg-white/[0.06] transition-all text-white">
-                      <div className="flex items-center gap-4 text-white">
-                        <div className="p-3 rounded-xl bg-white/5 text-white/40"><FileText className="w-5 h-5" /></div>
+                    <div key={idx} className="flex items-center justify-between rounded-lg border border-stone-200 bg-white p-4 transition-colors hover:bg-blue-50/40">
+                      <div className="flex items-center gap-4">
+                        <div className="rounded-lg bg-stone-50 p-3 text-slate-500"><FileText className="w-5 h-5" /></div>
                         <div className="flex flex-col truncate">
-                          <span className="text-xs font-mono text-white/80 truncate font-bold">{file.name}</span>
-                          <span className="text-[10px] text-white/20 uppercase tracking-tight">{(file.size / 1024).toFixed(1)} KB • {new Date(file.mtime).toLocaleString()}</span>
+                          <span className="truncate font-mono text-xs font-semibold text-slate-800">{file.name}</span>
+                          <span className="text-[10px] text-slate-500 uppercase tracking-tight">{(file.size / 1024).toFixed(1)} KB • {new Date(file.mtime).toLocaleString()}</span>
                         </div>
                       </div>
                       <div className="flex gap-2 transition-all">
                         <button 
                           onClick={() => openHarvestFile(file.name)}
-                          className="p-2 bg-blue-600/10 hover:bg-blue-600 text-blue-400 hover:text-white rounded-xl transition-all"
+                          className="rounded-lg bg-blue-50 p-2 text-blue-700 transition-colors hover:bg-blue-600 hover:text-white"
                           title="View Content"
                         >
                           <Eye className="w-4 h-4" />
@@ -4623,7 +5132,7 @@ export default function App() {
                             fetchHarvest();
                             addLog('wait', `Harvest asset purged: ${file.name}`);
                           }}
-                          className="p-2 bg-red-600/10 hover:bg-red-600 text-red-400 hover:text-white rounded-xl transition-all"
+                          className="rounded-lg bg-red-50 p-2 text-red-700 transition-colors hover:bg-red-600 hover:text-white"
                           title="Delete File"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -4632,18 +5141,18 @@ export default function App() {
                     </div>
                   ))}
                 {harvestFiles.filter((f: any) => f.name.toLowerCase().includes(harvestSearch.toLowerCase())).length === 0 && (
-                  <div className="py-12 text-center text-white">
-                    <div className="inline-block p-4 rounded-full bg-white/5 text-white/10 mb-4"><Search className="w-8 h-8 text-white/20" /></div>
-                    <p className="text-xs text-white/20 uppercase tracking-widest font-bold">No assets match your search</p>
+                  <div className="py-12 text-center text-slate-500">
+                    <div className="mb-4 inline-block rounded-full bg-stone-50 p-4 text-slate-300"><Search className="w-8 h-8" /></div>
+                    <p className="text-sm font-medium">No harvest records match your search</p>
                   </div>
                 )}
               </div>
 
-              <div className="h-16 border-t border-white/10 bg-white/[0.01] flex items-center px-8 justify-between">
-                 <div className="text-[10px] text-white/20 font-mono italic">Found {harvestFiles.length} total indexed assets</div>
-                 <button onClick={fetchHarvest} className="text-[10px] text-blue-400 hover:text-blue-300 font-bold uppercase tracking-widest flex items-center gap-2 transition-all">
+              <div className="flex h-16 items-center justify-between border-t border-stone-200 bg-stone-50 px-6">
+                 <div className="text-sm text-slate-500">Found {harvestFiles.length} total source files</div>
+                 <button onClick={fetchHarvest} className="flex items-center gap-2 text-sm font-medium text-blue-700 transition-colors hover:text-blue-900">
                    <RefreshCw className="w-3 h-3" />
-                   Sync Filesystem
+                   Sync files
                  </button>
               </div>
             </motion.div>

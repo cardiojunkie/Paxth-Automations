@@ -19,7 +19,7 @@ export function Textarea({ label, className = '', wrapperClassName = '', id, hel
   return (
     <div className={['block space-y-2', wrapperClassName].join(' ')}>
       {label ? (
-        <label htmlFor={textareaId} className="text-[10px] font-bold uppercase tracking-widest text-white/55">
+        <label htmlFor={textareaId} className="text-sm font-medium text-slate-700">
           {label}
         </label>
       ) : null}
@@ -28,16 +28,16 @@ export function Textarea({ label, className = '', wrapperClassName = '', id, hel
         aria-invalid={error ? true : props['aria-invalid']}
         aria-describedby={describedBy}
         className={[
-          'w-full rounded-lg border border-white/10 bg-zinc-950/70 px-3 py-2.5 text-sm text-white outline-none transition-colors',
-          'placeholder:text-white/25 focus:border-blue-500/60 focus:ring-2 focus:ring-blue-500/20',
-          'disabled:cursor-not-allowed disabled:opacity-50',
-          error ? 'border-red-400/45 focus:border-red-400/70 focus:ring-red-500/20' : '',
+          'w-full rounded-lg border border-stone-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition-colors',
+          'placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100',
+          'disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-slate-500',
+          error ? 'border-red-300 focus:border-red-500 focus:ring-red-100' : '',
           className,
         ].join(' ')}
         {...props}
       />
-      {helpText ? <p id={`${textareaId}-help`} className="text-[11px] leading-relaxed text-white/38">{helpText}</p> : null}
-      {error ? <p id={`${textareaId}-error`} className="text-[11px] font-medium leading-relaxed text-red-300">{error}</p> : null}
+      {helpText ? <p id={`${textareaId}-help`} className="text-xs leading-relaxed text-slate-500">{helpText}</p> : null}
+      {error ? <p id={`${textareaId}-error`} className="text-xs font-medium leading-relaxed text-red-600">{error}</p> : null}
     </div>
   );
 }
