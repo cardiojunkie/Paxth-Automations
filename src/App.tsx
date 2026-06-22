@@ -4,6 +4,13 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { PresetDropdown } from "./components/PresetDropdown";
 import { Alert, Badge, Button, Card, EmptyState, Input, LoadingState, Progress, Select, Tabs, Textarea } from "./components/ui";
 import type { SkuRecord, HarvestFile, Job } from "./types";
+import paxioHero from "./assets/paxio-login/assets/hero-polar-bear-panel-composite.png";
+import paxioLogo from "./assets/paxio-login/assets/paxio-logo-horizontal.svg";
+import paxioBackground from "./assets/paxio-login/assets/warm-wave-background.svg";
+import paxioMailIcon from "./assets/paxio-login/assets/icons/mail.svg";
+import paxioLockIcon from "./assets/paxio-login/assets/icons/lock.svg";
+import paxioEyeIcon from "./assets/paxio-login/assets/icons/eye.svg";
+import paxioShieldIcon from "./assets/paxio-login/assets/icons/shield.svg";
 /**
  * @license
  * SPDX-License-Identifier: Apache-2.0
@@ -426,6 +433,8 @@ export default function App() {
   const [loginEmail, setLoginEmail] = useState('');
   const [loginAccessCode, setLoginAccessCode] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [showLoginAccessCode, setShowLoginAccessCode] = useState(false);
+  const [rememberLogin, setRememberLogin] = useState(false);
   const [allowlistUsers, setAllowlistUsers] = useState<AllowlistUser[]>([]);
   const [newUserEmail, setNewUserEmail] = useState('');
   const [newUserRole, setNewUserRole] = useState<'admin' | 'user'>('user');
@@ -2224,48 +2233,103 @@ export default function App() {
           <LoadingState label="Restoring session..." />
         </div>
       ) : !authUser ? (
-        <div className="h-screen bg-brand-bg flex items-center justify-center p-6">
-          <Card className="w-full max-w-md" padded>
-            <div className="space-y-2 mb-6">
-              <div className="h-10 w-16 rounded-lg border border-white/10 bg-black overflow-hidden">
-                <img src="/logoq.png" alt="paxth logo" className="h-full w-full object-contain" />
-              </div>
-              <h1 className="text-2xl font-black tracking-tight text-slate-950">Paxth Automation Solution</h1>
-              <p className="text-sm text-slate-600">Sign in with an approved email and internal access code.</p>
+        <main
+          className="h-screen overflow-y-auto overflow-x-hidden bg-[#F8EEE7] bg-cover bg-center p-4 text-[#303237] sm:p-6 lg:grid lg:place-items-center lg:p-8"
+          style={{ backgroundImage: `url(${paxioBackground})` }}
+          aria-label="Paxio sign in"
+        >
+          <section className="mx-auto grid w-full max-w-[88rem] grid-cols-1 overflow-hidden rounded-[2rem] bg-[#FFFDFB]/95 p-2 shadow-[0_26px_70px_rgba(101,73,60,0.18)] lg:grid-cols-[55fr_45fr] lg:p-3">
+            <div className="h-64 overflow-hidden rounded-[1.5rem] sm:h-[26rem] lg:h-auto lg:min-h-[44rem]" aria-label="Paxio polar bear mascot">
+              <img src={paxioHero} alt="" className="h-full w-full object-cover" />
             </div>
-            <div className="space-y-4">
-              <Input
-                type="email"
-                value={loginEmail}
-                onChange={(e) => setLoginEmail(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !isLoggingIn) submitLogin();
+
+            <div className="flex items-center justify-center bg-white/70 px-5 py-10 sm:px-8 lg:bg-gradient-to-r lg:from-white/70 lg:to-white/95 lg:px-11 lg:py-14">
+              <form
+                className="w-full max-w-[21rem]"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!isLoggingIn) void submitLogin();
                 }}
-                placeholder="name@company.com"
-                label="Email"
-              />
-              <Input
-                type="password"
-                value={loginAccessCode}
-                onChange={(e) => setLoginAccessCode(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !isLoggingIn) submitLogin();
-                }}
-                placeholder="Access code"
-                autoComplete="current-password"
-                label="Access code"
-              />
-              <Button
-                onClick={submitLogin}
-                disabled={isLoggingIn || !loginEmail.trim() || !loginAccessCode.trim()}
-                className="w-full"
-                size="lg"
               >
-                {isLoggingIn ? 'Signing In...' : 'Sign In'}
-              </Button>
+                <img src={paxioLogo} alt="Paxio by Paxth Automation Solutions" className="mb-7 h-auto w-56 sm:w-60" />
+                <h1 className="mb-2 text-4xl font-extrabold leading-tight tracking-tight text-[#303237]">Sign In</h1>
+                <p className="mb-8 text-base leading-relaxed text-[#7B706B]">
+                  Sign in with your approved email and internal access code.
+                </p>
+
+                <label htmlFor="login-email" className="mb-2 block text-sm font-semibold text-[#303237]">
+                  Email
+                </label>
+                <div className="mb-6 flex h-12 items-center rounded-lg border border-[#DAB8AE] bg-[#FFF7F3]/75 text-[#7B706B] transition-colors focus-within:border-[#B56654] focus-within:ring-2 focus-within:ring-[#D8A494]/35">
+                  <img src={paxioMailIcon} alt="" className="ml-3.5 h-[18px] w-[18px] shrink-0" />
+                  <input
+                    id="login-email"
+                    type="email"
+                    value={loginEmail}
+                    onChange={(e) => setLoginEmail(e.target.value)}
+                    placeholder="name@company.com"
+                    autoComplete="email"
+                    className="h-full min-w-0 flex-1 bg-transparent px-3 text-sm text-[#303237] outline-none placeholder:text-[#8E817B]"
+                  />
+                </div>
+
+                <label htmlFor="login-access-code" className="mb-2 block text-sm font-semibold text-[#303237]">
+                  Access code
+                </label>
+                <div className="flex h-12 items-center rounded-lg border border-[#DAB8AE] bg-[#FFF7F3]/75 text-[#7B706B] transition-colors focus-within:border-[#B56654] focus-within:ring-2 focus-within:ring-[#D8A494]/35">
+                  <img src={paxioLockIcon} alt="" className="ml-3.5 h-[18px] w-[18px] shrink-0" />
+                  <input
+                    id="login-access-code"
+                    type={showLoginAccessCode ? 'text' : 'password'}
+                    value={loginAccessCode}
+                    onChange={(e) => setLoginAccessCode(e.target.value)}
+                    placeholder="Enter your access code"
+                    autoComplete="current-password"
+                    className="h-full min-w-0 flex-1 bg-transparent px-3 text-sm text-[#303237] outline-none placeholder:text-[#8E817B]"
+                  />
+                  <button
+                    type="button"
+                    aria-label={showLoginAccessCode ? 'Hide access code' : 'Show access code'}
+                    onClick={() => setShowLoginAccessCode((shown) => !shown)}
+                    className="grid h-full w-11 place-items-center rounded-r-lg text-[#B56654] transition-colors hover:bg-[#F4E4D8]/65 focus:outline-none focus:ring-2 focus:ring-[#B56654]/35"
+                  >
+                    <img src={paxioEyeIcon} alt="" className="h-[18px] w-[18px]" />
+                  </button>
+                </div>
+
+                <div className="my-7 flex items-center justify-between gap-4 text-sm">
+                  <label className="flex cursor-pointer items-center gap-2.5 text-[#303237]">
+                    <input
+                      type="checkbox"
+                      checked={rememberLogin}
+                      onChange={(e) => setRememberLogin(e.target.checked)}
+                      className="h-[18px] w-[18px] rounded border-[#DAB8AE] accent-[#B56654]"
+                    />
+                    Remember me
+                  </label>
+                  <button type="button" className="font-medium text-[#B56654] transition-colors hover:text-[#9C4F41] hover:underline">
+                    Need help?
+                  </button>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isLoggingIn || !loginEmail.trim() || !loginAccessCode.trim()}
+                  aria-busy={isLoggingIn}
+                  className="h-12 w-full rounded-lg bg-gradient-to-b from-[#B56654] to-[#9C4F41] text-base font-semibold text-white shadow-[0_10px_20px_rgba(181,102,84,0.22)] transition hover:brightness-105 focus:outline-none focus:ring-2 focus:ring-[#B56654]/40 focus:ring-offset-2 focus:ring-offset-[#FFFDFB] disabled:pointer-events-none disabled:opacity-60"
+                >
+                  {isLoggingIn ? 'Signing In...' : 'Sign in'}
+                </button>
+
+                <div className="my-8 h-px bg-[#E7DDD8]" />
+                <p className="flex items-center gap-2.5 text-xs text-[#6D625D]">
+                  <img src={paxioShieldIcon} alt="" className="h-[18px] w-[18px]" />
+                  Secure access. Trusted by your team.
+                </p>
+              </form>
             </div>
-          </Card>
-        </div>
+          </section>
+        </main>
       ) : (
       <AppShell<ModuleId>
         productName="paxth"

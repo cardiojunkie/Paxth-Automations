@@ -1,0 +1,9 @@
+<svg width="330" height="92" viewBox="0 0 330 92" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Paxio by Paxth Automation Solutions">
+  <g transform="translate(0 3) scale(0.74)">
+    <rect x="17" y="13" width="62" height="70" rx="14" stroke="#B56654" stroke-width="6"/>
+    <path d="M39 65V31H54.5C62.5 31 68 36.2 68 43.5C68 50.9 62.5 56 54.5 56H47V65H39ZM47 49H54C57.8 49 60 46.9 60 43.6C60 40.3 57.8 38 54 38H47V49Z" fill="#B56654"/>
+    <path d="M27 82H44" stroke="#B56654" stroke-width="6" stroke-linecap="round"/>
+  </g>
+  <text x="78" y="43" font-family="Inter, Arial, sans-serif" font-size="44" font-weight="800" fill="#303237">Paxio</text>
+  <text x="78" y="72" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="500" letter-spacing="0.1" fill="#B56654">by Paxth Automation Solutions</text>
+</svg>

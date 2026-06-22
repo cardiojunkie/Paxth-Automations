@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Paxio Login Prototype</title>
+  <link rel="icon" href="./assets/favicon.svg" />
+  <style>
+    :root {
+      --bg: #F8EEE7;
+      --surface: #FFFDFB;
+      --text: #303237;
+      --muted: #7B706B;
+      --brand: #B56654;
+      --brand-dark: #9C4F41;
+      --border: #E6C9BF;
+      --input-border: #DAB8AE;
+      --shadow: 0 26px 70px rgba(101, 73, 60, 0.18);
+      --font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--font);
+      color: var(--text);
+      background: var(--bg) url("./assets/warm-wave-background.svg") center/cover no-repeat;
+      display: grid;
+      place-items: center;
+      padding: 42px;
+    }
+    .shell {
+      width: min(1420px, 90vw);
+      min-height: min(740px, 78vh);
+      display: grid;
+      grid-template-columns: 55% 45%;
+      gap: 0;
+      padding: 14px;
+      border-radius: 32px;
+      background: rgba(255, 253, 251, 0.92);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .hero {
+      min-height: 710px;
+      border-radius: 24px;
+      background: url("./assets/hero-polar-bear-panel-composite.png") center/cover no-repeat;
+    }
+    .formSide {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 58px 44px;
+      background: linear-gradient(90deg, rgba(255,255,255,.68), rgba(255,255,255,.92));
+    }
+    .formWrap { width: min(330px, 100%); }
+    .logo { width: 245px; height: auto; margin-bottom: 28px; display: block; }
+    h1 { margin: 0 0 10px; font-size: 35px; line-height: 1.1; letter-spacing: -0.04em; font-weight: 800; }
+    .intro { margin: 0 0 32px; color: var(--muted); font-size: 16px; line-height: 1.55; }
+    label { display: block; margin: 18px 0 8px; font-size: 14px; font-weight: 650; }
+    .input {
+      position: relative;
+      display: flex;
+      align-items: center;
+      height: 48px;
+      border: 1px solid var(--input-border);
+      border-radius: 8px;
+      background: rgba(255, 250, 247, 0.74);
+      color: var(--muted);
+    }
+    .input img { width: 18px; height: 18px; margin-left: 14px; flex: 0 0 auto; }
+    .input input {
+      width: 100%;
+      border: 0;
+      outline: none;
+      background: transparent;
+      padding: 0 14px;
+      font: inherit;
+      font-size: 14px;
+      color: var(--text);
+    }
+    .input button { border: 0; background: transparent; cursor: pointer; padding: 0 12px; display: grid; place-items: center; }
+    .input button img { margin: 0; }
+    .row {
+      display: flex; justify-content: space-between; align-items: center;
+      margin: 26px 0 32px; font-size: 14px;
+    }
+    .remember { display: flex; align-items: center; gap: 10px; color: var(--text); }
+    .remember img { width: 18px; height: 18px; }
+    a { color: var(--brand); text-decoration: none; font-weight: 500; }
+    .submit {
+      width: 100%;
+      height: 50px;
+      border: 0;
+      border-radius: 8px;
+      color: #fff;
+      font: inherit;
+      font-size: 16px;
+      font-weight: 650;
+      background: linear-gradient(180deg, var(--brand), var(--brand-dark));
+      box-shadow: 0 10px 20px rgba(181, 102, 84, .22);
+      cursor: pointer;
+    }
+    .divider { height: 1px; background: #E7DDD8; margin: 36px 0 28px; }
+    .security { display: flex; align-items: center; gap: 10px; color: #6D625D; font-size: 12px; }
+    .security img { width: 18px; height: 18px; }
+    @media (max-width: 900px) {
+      body { padding: 18px; }
+      .shell { grid-template-columns: 1fr; width: min(520px, 100%); padding: 10px; }
+      .hero { min-height: 430px; }
+      .formSide { padding: 38px 24px 34px; }
+      .logo { width: 220px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell" aria-label="Paxio sign in">
+    <section class="hero" aria-label="Paxio polar bear mascot"></section>
+    <section class="formSide">
+      <div class="formWrap">
+        <img class="logo" src="./assets/paxio-logo-horizontal.svg" alt="Paxio by Paxth Automation Solutions" />
+        <h1>Sign In</h1>
+        <p class="intro">Sign in with your approved email and internal access code.</p>
+
+        <label for="email">Email</label>
+        <div class="input"><img src="./assets/icons/mail.svg" alt="" /><input id="email" type="email" placeholder="name@company.com" /></div>
+
+        <label for="code">Access code</label>
+        <div class="input"><img src="./assets/icons/lock.svg" alt="" /><input id="code" type="password" placeholder="Enter your access code" /><button type="button" aria-label="Show access code"><img src="./assets/icons/eye.svg" alt="" /></button></div>
+
+        <div class="row">
+          <span class="remember"><img src="./assets/icons/checkbox-empty.svg" alt="" />Remember me</span>
+          <a href="#">Need help?</a>
+        </div>
+
+        <button class="submit">Sign in</button>
+        <div class="divider"></div>
+        <p class="security"><img src="./assets/icons/shield.svg" alt="" />Secure access. Trusted by your team.</p>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

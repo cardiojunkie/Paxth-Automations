@@ -1,0 +1,39 @@
+{
+  "brand": {
+    "name": "Paxio",
+    "byline": "by Paxth Automation Solutions",
+    "tagline": "WORK. FLOW. GROW.",
+    "supportingText": [
+      "Automate with confidence.",
+      "Operate with clarity."
+    ]
+  },
+  "colors": {
+    "background": "#F8EEE7",
+    "backgroundWarm": "#F4E4D8",
+    "surface": "#FFFDFB",
+    "surfaceSoft": "#FFF7F3",
+    "text": "#303237",
+    "mutedText": "#7B706B",
+    "brand": "#B56654",
+    "brandDark": "#9C4F41",
+    "brandLight": "#D8A494",
+    "border": "#E6C9BF",
+    "inputBorder": "#DAB8AE",
+    "shadow": "0 26px 70px rgba(101, 73, 60, 0.18)"
+  },
+  "layout": {
+    "aspectRatio": "16:9",
+    "canvasMaxWidth": "1420px",
+    "cardBorderRadius": "30px",
+    "heroBorderRadius": "24px",
+    "formWidth": "325px",
+    "desktopCardHeight": "740px"
+  },
+  "typography": {
+    "fontFamily": "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    "logoWeight": 800,
+    "headingWeight": 800,
+    "bodyWeight": 400
+  }
+}
