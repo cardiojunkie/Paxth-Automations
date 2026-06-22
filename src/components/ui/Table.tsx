@@ -3,18 +3,18 @@ import React from 'react';
 export function TableContainer({ className = '', ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={['w-full overflow-x-auto rounded-lg border border-stone-200 bg-white shadow-sm custom-scrollbar', className].join(' ')}
+      className={['w-full overflow-x-auto rounded-xl border border-stone-200 bg-[var(--paxio-surface-glass)] shadow-[var(--paxio-shadow-soft)] backdrop-blur-sm custom-scrollbar', className].join(' ')}
       {...props}
     />
   );
 }
 
 export function Table({ className = '', ...props }: React.TableHTMLAttributes<HTMLTableElement>) {
-  return <table className={['w-full min-w-max border-collapse text-left text-sm text-slate-700', className].join(' ')} {...props} />;
+  return <table className={['w-full min-w-max border-collapse text-left text-sm text-slate-800', className].join(' ')} {...props} />;
 }
 
 export function TableHead({ className = '', ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
-  return <thead className={['sticky top-0 z-10 border-b border-stone-200 bg-stone-50 text-slate-500', className].join(' ')} {...props} />;
+  return <thead className={['sticky top-0 z-10 border-b border-[var(--paxio-border)] bg-[var(--paxio-bg-soft)] text-slate-600', className].join(' ')} {...props} />;
 }
 
 export function TableBody({ className = '', ...props }: React.HTMLAttributes<HTMLTableSectionElement>) {
@@ -22,7 +22,7 @@ export function TableBody({ className = '', ...props }: React.HTMLAttributes<HTM
 }
 
 export function TableRow({ className = '', ...props }: React.HTMLAttributes<HTMLTableRowElement>) {
-  return <tr className={['transition-colors hover:bg-blue-50/45', className].join(' ')} {...props} />;
+  return <tr className={['transition-colors hover:bg-[var(--paxio-bg-soft)]', className].join(' ')} {...props} />;
 }
 
 export function TableCell({ className = '', ...props }: React.TdHTMLAttributes<HTMLTableCellElement>) {

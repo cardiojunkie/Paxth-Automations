@@ -1,40 +1,62 @@
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
+:root {
+  --paxio-bg: #f8eee7;
+  --paxio-bg-soft: #fff7f3;
+  --paxio-surface: #fffdfb;
+  --paxio-surface-raised: #ffffff;
+  --paxio-surface-glass: rgba(255, 253, 251, 0.82);
+  --paxio-primary: #b56654;
+  --paxio-primary-hover: #9c4f41;
+  --paxio-accent: #d8a494;
+  --paxio-border: #e6c9bf;
+  --paxio-text: #303237;
+  --paxio-muted: #7b706b;
+  --paxio-success: #4f7a5d;
+  --paxio-warning: #a66a2c;
+  --paxio-danger: #a5483d;
+  --paxio-radius-sm: 0.5rem;
+  --paxio-radius-md: 0.75rem;
+  --paxio-radius-lg: 1rem;
+  --paxio-shadow-soft: 0 10px 28px rgba(101, 73, 60, 0.08);
+  --paxio-shadow-card: 0 18px 54px rgba(101, 73, 60, 0.1);
+}
+
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 
-  --color-brand-bg: #faf7f4;
-  --color-brand-panel: #ffffff;
-  --color-brand-border: #e4d6ce;
-  --color-surface-base: #faf7f4;
-  --color-surface-panel: #ffffff;
-  --color-surface-raised: #ffffff;
-  --color-surface-muted: #f4ece6;
-  --color-border-soft: #e4d6ce;
-  --color-border-strong: #d2bfb4;
-  --color-accent-primary: #8f4e3a;
-  --color-accent-success: #3f6f4e;
-  --color-accent-warning: #a66a2c;
-  --color-accent-danger: #a5483d;
+  --color-brand-bg: var(--paxio-bg);
+  --color-brand-panel: var(--paxio-surface);
+  --color-brand-border: var(--paxio-border);
+  --color-surface-base: var(--paxio-bg);
+  --color-surface-panel: var(--paxio-surface);
+  --color-surface-raised: var(--paxio-surface-raised);
+  --color-surface-muted: var(--paxio-bg-soft);
+  --color-border-soft: var(--paxio-border);
+  --color-border-strong: #dab8ae;
+  --color-accent-primary: var(--paxio-primary);
+  --color-accent-success: var(--paxio-success);
+  --color-accent-warning: var(--paxio-warning);
+  --color-accent-danger: var(--paxio-danger);
 
-  --color-slate-50: #faf7f4;
-  --color-slate-100: #f4ece6;
-  --color-slate-200: #e4d6ce;
-  --color-slate-300: #d2bfb4;
-  --color-slate-400: #9a8479;
-  --color-slate-500: #6f5e56;
-  --color-slate-600: #5a4942;
-  --color-slate-700: #3f322d;
-  --color-slate-800: #2d211d;
-  --color-slate-900: #1f1714;
-  --color-slate-950: #130e0c;
+  --color-slate-50: #fffdfb;
+  --color-slate-100: #fff7f3;
+  --color-slate-200: #e6c9bf;
+  --color-slate-300: #dab8ae;
+  --color-slate-400: #9f8d85;
+  --color-slate-500: #7b706b;
+  --color-slate-600: #6d625d;
+  --color-slate-700: #514742;
+  --color-slate-800: #303237;
+  --color-slate-900: #25272b;
+  --color-slate-950: #191b1f;
 
-  --color-stone-50: #f8f2ed;
-  --color-stone-100: #f4ece6;
-  --color-stone-200: #e4d6ce;
-  --color-stone-300: #d2bfb4;
+  --color-stone-50: #fff7f3;
+  --color-stone-100: #f4e4d8;
+  --color-stone-200: #e6c9bf;
+  --color-stone-300: #dab8ae;
   --color-stone-400: #a98f82;
   --color-stone-500: #806a60;
   --color-stone-600: #6f5e56;
@@ -186,6 +208,30 @@
 @layer base {
   body {
     @apply h-screen w-screen overflow-hidden bg-brand-bg font-sans text-slate-800 antialiased selection:bg-blue-100 selection:text-blue-950;
+    color: var(--paxio-text);
+    background:
+      radial-gradient(circle at 78% 14%, rgba(255, 255, 255, 0.5), transparent 24rem),
+      radial-gradient(circle at 12% 88%, rgba(255, 255, 255, 0.32), transparent 18rem),
+      linear-gradient(180deg, var(--paxio-bg) 0%, var(--paxio-bg-soft) 54%, #f4e4d8 100%);
+  }
+
+  #root {
+    min-height: 100vh;
+    color: var(--paxio-text);
+    background:
+      radial-gradient(circle at 82% 12%, rgba(255, 255, 255, 0.42), transparent 24rem),
+      radial-gradient(circle at 8% 92%, rgba(255, 255, 255, 0.28), transparent 18rem),
+      linear-gradient(180deg, var(--paxio-bg) 0%, var(--paxio-bg-soft) 54%, #f4e4d8 100%);
+  }
+
+  #root::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background:
+      linear-gradient(175deg, transparent 0 18%, rgba(255, 253, 251, 0.32) 18% 30%, transparent 30%),
+      linear-gradient(355deg, transparent 0 72%, rgba(244, 228, 216, 0.42) 72% 86%, transparent 86%);
   }
 
   button, input, textarea, select {
@@ -202,7 +248,10 @@
   .glass-panel,
   .app-surface,
   .dashboard-card {
-    @apply rounded-lg border border-stone-200 bg-white shadow-sm;
+    @apply rounded-xl border border-stone-200 shadow-sm backdrop-blur-sm;
+    background: var(--paxio-surface-glass);
+    border-color: var(--paxio-border);
+    box-shadow: var(--paxio-shadow-card);
   }
 
   .accent-glow {
@@ -215,11 +264,15 @@
   }
 
   .dashboard-card-muted {
-    @apply rounded-lg border border-stone-200 bg-stone-50;
+    @apply rounded-xl border border-stone-200;
+    background: color-mix(in srgb, var(--paxio-bg-soft) 82%, white);
+    border-color: var(--paxio-border);
+    box-shadow: var(--paxio-shadow-soft);
   }
 
   .dashboard-card-header {
     @apply flex items-start justify-between gap-4 border-b border-stone-200 px-5 py-4;
+    border-color: color-mix(in srgb, var(--paxio-border) 82%, white);
   }
 
   .dashboard-card-body {
@@ -232,7 +285,15 @@
 
   .form-control,
   .form-control-mono {
-    @apply w-full rounded-lg border border-stone-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition-colors placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:opacity-50;
+    @apply w-full rounded-lg border px-3 py-2.5 text-sm text-slate-900 outline-none transition-colors placeholder:text-slate-500 focus:ring-2 disabled:cursor-not-allowed disabled:opacity-60;
+    background: var(--paxio-surface);
+    border-color: var(--paxio-border);
+  }
+
+  .form-control:focus,
+  .form-control-mono:focus {
+    border-color: var(--paxio-primary);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--paxio-accent) 28%, transparent);
   }
 
   .form-control-mono {
@@ -240,32 +301,54 @@
   }
 
   .upload-zone {
-    @apply relative flex cursor-pointer flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-stone-300 bg-stone-50 p-5 text-center transition-colors hover:border-blue-400 hover:bg-blue-50;
+    @apply relative flex cursor-pointer flex-col items-center justify-center gap-3 rounded-xl border border-dashed p-5 text-center transition-colors;
+    background: color-mix(in srgb, var(--paxio-bg-soft) 78%, white);
+    border-color: var(--paxio-border);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.68);
+  }
+
+  .upload-zone:hover,
+  .upload-zone:focus-within {
+    background: var(--paxio-bg-soft);
+    border-color: var(--paxio-primary);
   }
 
   .data-table-shell {
-    @apply overflow-x-auto overflow-y-hidden rounded-lg border border-stone-200 bg-white shadow-sm;
+    @apply overflow-x-auto overflow-y-hidden rounded-xl border border-stone-200 shadow-sm backdrop-blur-sm;
+    background: var(--paxio-surface-glass);
+    border-color: var(--paxio-border);
+    box-shadow: var(--paxio-shadow-soft);
     max-width: 100%;
     scrollbar-width: thin;
     scrollbar-color: rgba(111, 94, 86, 0.35) transparent;
   }
 
   .data-table-header {
-    @apply min-w-[980px] border-b border-stone-200 bg-stone-50 text-xs font-semibold text-slate-500;
+    @apply min-w-[980px] border-b border-stone-200 bg-stone-50 text-xs font-semibold text-slate-600;
+    background: color-mix(in srgb, var(--paxio-bg-soft) 74%, white);
+    border-color: color-mix(in srgb, var(--paxio-border) 82%, white);
   }
 
   .data-table-row {
-    @apply min-w-[980px] border-b border-stone-100 text-slate-700 transition-colors hover:bg-blue-50/45;
+    @apply min-w-[980px] border-b border-stone-100 text-slate-800 transition-colors;
+    border-color: color-mix(in srgb, var(--paxio-border) 56%, white);
+  }
+
+  .data-table-row:hover {
+    background: color-mix(in srgb, var(--paxio-bg-soft) 70%, white);
   }
 
   .empty-panel {
-    @apply flex min-h-48 flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 p-8 text-center text-slate-500;
+    @apply flex min-h-48 flex-col items-center justify-center rounded-xl border border-dashed border-stone-300 p-8 text-center text-slate-500;
+    background: color-mix(in srgb, var(--paxio-bg-soft) 72%, white);
+    border-color: var(--paxio-border);
   }
 
   .terminal-card {
-    @apply rounded-lg border text-slate-100 shadow-sm;
+    @apply rounded-xl border text-slate-100;
     background: #050302 !important;
-    border-color: #2a1e1a !important;
+    border-color: color-mix(in srgb, var(--paxio-border) 42%, #2a1e1a) !important;
+    box-shadow: var(--paxio-shadow-card);
   }
 
   .terminal-card [class*="bg-white/"] {
@@ -279,20 +362,22 @@
   .settings-saas [class*="bg-[#0a0a0a]"],
   .settings-saas [class*="bg-black/60"],
   .settings-saas [class*="bg-black/40"] {
-    background: #fff !important;
+    background: var(--paxio-surface-glass) !important;
+    box-shadow: var(--paxio-shadow-soft);
+    backdrop-filter: blur(12px);
   }
 
   .settings-saas [class*="border-white/"] {
-    border-color: #e4d6ce !important;
+    border-color: var(--paxio-border) !important;
   }
 
   .settings-saas [class*="rounded-[32px]"],
   .settings-saas [class*="rounded-3xl"] {
-    border-radius: 0.5rem !important;
+    border-radius: var(--paxio-radius-lg) !important;
   }
 
   .settings-saas [class*="shadow-2xl"] {
-    box-shadow: 0 1px 2px rgb(45 33 29 / 0.06) !important;
+    box-shadow: var(--paxio-shadow-card) !important;
   }
 
   .settings-saas h3,
@@ -310,10 +395,10 @@
   .settings-saas input,
   .settings-saas select,
   .settings-saas textarea {
-    background: #fff !important;
+    background: var(--paxio-surface-raised) !important;
     border-color: #d2bfb4 !important;
     color: #2d211d !important;
-    border-radius: 0.5rem !important;
+    border-radius: var(--paxio-radius-sm) !important;
   }
 
   .settings-saas button[class*="bg-blue-600"],
@@ -334,7 +419,7 @@
   }
 
   .sources-saas [class*="border-white/"] {
-    border-color: #e4d6ce !important;
+    border-color: var(--paxio-border) !important;
   }
 
   #config-panel [class*="text-white/"] {
@@ -442,7 +527,7 @@
 
   .custom-scrollbar {
     scrollbar-width: thin;
-    scrollbar-color: rgba(111, 94, 86, 0.35) transparent;
+    scrollbar-color: color-mix(in srgb, var(--paxio-muted) 35%, transparent) transparent;
   }
 
   .custom-scrollbar::-webkit-scrollbar {
@@ -455,14 +540,14 @@
   }
 
   .custom-scrollbar::-webkit-scrollbar-thumb {
-    background: rgba(111, 94, 86, 0.25);
+    background: color-mix(in srgb, var(--paxio-muted) 25%, transparent);
     border: 3px solid transparent;
     border-radius: 999px;
     background-clip: content-box;
   }
 
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    background: rgba(111, 94, 86, 0.45);
+    background: color-mix(in srgb, var(--paxio-muted) 45%, transparent);
     background-clip: content-box;
   }
 

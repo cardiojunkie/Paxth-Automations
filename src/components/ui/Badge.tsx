@@ -3,10 +3,10 @@ import React from 'react';
 type BadgeTone = 'neutral' | 'blue' | 'green' | 'amber' | 'red';
 
 const toneClasses: Record<BadgeTone, string> = {
-  neutral: 'border-stone-200 bg-stone-50 text-slate-700',
-  blue: 'border-blue-200 bg-blue-50 text-blue-800',
+  neutral: 'border-stone-200 bg-stone-50 text-slate-800',
+  blue: 'border-sky-200 bg-sky-50 text-sky-800',
   green: 'border-emerald-200 bg-emerald-50 text-emerald-800',
-  amber: 'border-amber-200 bg-amber-50 text-amber-800',
+  amber: 'border-amber-200 bg-amber-50 text-amber-900',
   red: 'border-red-200 bg-red-50 text-red-800',
 };
 

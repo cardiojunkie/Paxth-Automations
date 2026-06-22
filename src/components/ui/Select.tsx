@@ -28,8 +28,8 @@ export function Select({ label, className = '', wrapperClassName = '', id, child
         aria-invalid={error ? true : props['aria-invalid']}
         aria-describedby={describedBy}
         className={[
-          'w-full rounded-lg border border-stone-300 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition-colors',
-          'focus:border-blue-500 focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-slate-500',
+          'w-full rounded-lg border border-[var(--paxio-border)] bg-[var(--paxio-surface)] px-3 py-2.5 text-sm text-slate-900 outline-none transition-colors',
+          'focus:border-[var(--paxio-primary)] focus:ring-2 focus:ring-[var(--paxio-accent)]/30 disabled:cursor-not-allowed disabled:bg-stone-100 disabled:text-slate-600',
           error ? 'border-red-300 focus:border-red-500 focus:ring-red-100' : '',
           className,
         ].join(' ')}

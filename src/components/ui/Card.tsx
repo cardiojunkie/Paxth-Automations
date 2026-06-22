@@ -8,7 +8,7 @@ export function Card({ className = '', padded = true, ...props }: CardProps) {
   return (
     <div
       className={[
-        'rounded-lg border border-stone-200 bg-white text-slate-800 shadow-sm',
+        'rounded-xl border border-stone-200 bg-[var(--paxio-surface-glass)] text-slate-800 shadow-[var(--paxio-shadow-card)] backdrop-blur-sm',
         padded ? 'p-5' : '',
         className,
       ].join(' ')}
@@ -22,5 +22,5 @@ export function CardHeader({ className = '', ...props }: React.HTMLAttributes<HT
 }
 
 export function CardTitle({ className = '', ...props }: React.HTMLAttributes<HTMLHeadingElement>) {
-  return <h3 className={['text-sm font-semibold text-slate-950', className].join(' ')} {...props} />;
+  return <h3 className={['text-sm font-semibold text-slate-900', className].join(' ')} {...props} />;
 }

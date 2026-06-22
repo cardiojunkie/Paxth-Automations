@@ -6,7 +6,6 @@ import { Alert, Badge, Button, Card, EmptyState, Input, LoadingState, Progress, 
 import type { SkuRecord, HarvestFile, Job } from "./types";
 import paxioHero from "./assets/paxio-login/assets/hero-polar-bear-panel-composite.png";
 import paxioLogo from "./assets/paxio-login/assets/paxio-logo-horizontal.svg";
-import paxioBackground from "./assets/paxio-login/assets/warm-wave-background.svg";
 import paxioMailIcon from "./assets/paxio-login/assets/icons/mail.svg";
 import paxioLockIcon from "./assets/paxio-login/assets/icons/lock.svg";
 import paxioEyeIcon from "./assets/paxio-login/assets/icons/eye.svg";
@@ -2234,16 +2233,15 @@ export default function App() {
         </div>
       ) : !authUser ? (
         <main
-          className="h-screen overflow-y-auto overflow-x-hidden bg-[#F8EEE7] bg-cover bg-center p-4 text-[#303237] sm:p-6 lg:grid lg:place-items-center lg:p-8"
-          style={{ backgroundImage: `url(${paxioBackground})` }}
+          className="h-screen overflow-y-auto overflow-x-hidden bg-[#F8EEE7] p-4 text-[#303237] sm:p-6 lg:grid lg:place-items-center lg:p-8"
           aria-label="Paxio sign in"
         >
-          <section className="mx-auto grid w-full max-w-[88rem] grid-cols-1 overflow-hidden rounded-[2rem] bg-[#FFFDFB]/95 p-2 shadow-[0_26px_70px_rgba(101,73,60,0.18)] lg:grid-cols-[55fr_45fr] lg:p-3">
+          <section className="mx-auto grid w-full max-w-[88rem] grid-cols-1 overflow-hidden rounded-[2rem] bg-[#FFFDFB] p-2 shadow-[0_26px_70px_rgba(101,73,60,0.18)] lg:grid-cols-[55fr_45fr] lg:p-3">
             <div className="h-64 overflow-hidden rounded-[1.5rem] sm:h-[26rem] lg:h-auto lg:min-h-[44rem]" aria-label="Paxio polar bear mascot">
               <img src={paxioHero} alt="" className="h-full w-full object-cover" />
             </div>
 
-            <div className="flex items-center justify-center bg-white/70 px-5 py-10 sm:px-8 lg:bg-gradient-to-r lg:from-white/70 lg:to-white/95 lg:px-11 lg:py-14">
+            <div className="flex items-center justify-center bg-[#FFFDFB] px-5 py-10 sm:px-8 lg:px-11 lg:py-14">
               <form
                 className="w-full max-w-[21rem]"
                 onSubmit={(e) => {
@@ -2332,9 +2330,9 @@ export default function App() {
         </main>
       ) : (
       <AppShell<ModuleId>
-        productName="paxth"
+        productName="Paxio"
         versionLabel="v22.30"
-        logoSrc="/logoq.png"
+        logoSrc={paxioLogo}
         navItems={moduleNavItems}
         activeNavId={currentModule}
         onNavChange={setCurrentModule}
@@ -3099,7 +3097,7 @@ export default function App() {
                    >
                     <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 pb-6 border-b border-stone-200">
                        <div className="space-y-1 text-left">
-                         <div className="flex items-center gap-2 text-blue-500 mb-1">
+                         <div className="flex items-center gap-2 text-[var(--paxio-primary)] mb-1">
                            <Settings className="w-4 h-4" />
                            <span className="text-xs font-medium">Admin configuration</span>
                          </div>
@@ -3109,7 +3107,7 @@ export default function App() {
                          </p>
                        </div>
                        
-                       <div className="flex flex-wrap gap-1 rounded-lg border border-stone-200 bg-white p-1 shadow-sm">
+                       <div className="flex flex-wrap gap-1 rounded-lg border border-[var(--paxio-border)] bg-[var(--paxio-bg-soft)] p-1 shadow-sm">
                           {[
                             { id: 'api', label: 'Connectivity', icon: Globe },
                             { id: 'mapping', label: 'Mapping Logic', icon: Network },
@@ -3118,12 +3116,12 @@ export default function App() {
                             <button 
                               key={tab.id}
                               onClick={() => setSettingsSubModule(tab.id as any)}
-                              className={`relative flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors ${settingsSubModule === tab.id ? 'text-white' : 'text-slate-600 hover:bg-stone-50 hover:text-slate-900'}`}
+                              className={`relative flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors ${settingsSubModule === tab.id ? 'text-white' : 'text-slate-600 hover:bg-[var(--paxio-surface)] hover:text-slate-900'}`}
                             >
                               {settingsSubModule === tab.id && (
                                 <motion.div 
                                   layoutId="activeTabSettingsFull"
-                                  className="absolute inset-0 bg-blue-600"
+                                  className="absolute inset-0 bg-[var(--paxio-primary)]"
                                   transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
                                 />
                               )}
@@ -3148,7 +3146,7 @@ export default function App() {
                               <div className="grid grid-cols-1 gap-6 pt-4 pb-20 xl:grid-cols-3">
                                 <Card className="p-6">
                                   <div className="flex items-start gap-3">
-                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--paxio-bg-soft)] text-[var(--paxio-primary)]">
                                       <Key className="h-5 w-5" />
                                     </div>
                                     <div>
@@ -3190,7 +3188,7 @@ export default function App() {
 
                                 <Card className="p-6">
                                   <div className="flex items-start gap-3">
-                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--paxio-bg-soft)] text-[var(--paxio-primary)]">
                                       <Network className="h-5 w-5" />
                                     </div>
                                     <div>
@@ -3256,9 +3254,9 @@ export default function App() {
                                           Refresh
                                         </Button>
                                       </div>
-                                      <div className="max-h-56 space-y-2 overflow-y-auto pr-1 custom-scrollbar">
+                                      <div className="max-h-72 space-y-2 overflow-y-auto pr-1 custom-scrollbar">
                                         {allowlistUsers.map((u) => (
-                                          <div key={u.email} className="flex items-center justify-between gap-3 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2">
+                                          <div key={u.email} className="flex items-center justify-between gap-3 rounded-lg border border-[var(--paxio-border)] bg-[var(--paxio-surface)] px-3 py-2.5">
                                             <div className="min-w-0">
                                               <div className="truncate text-sm font-medium text-slate-900">{u.email}</div>
                                               <div className="mt-0.5 text-xs uppercase tracking-wider text-slate-500">{u.role}</div>
@@ -3275,7 +3273,7 @@ export default function App() {
                                           </div>
                                         ))}
                                         {allowlistUsers.length === 0 && (
-                                          <p className="rounded-lg border border-dashed border-stone-300 p-4 text-sm text-slate-500">No users found.</p>
+                                          <p className="rounded-lg border border-dashed border-[var(--paxio-border)] bg-[var(--paxio-bg-soft)] p-4 text-sm text-slate-500">No users found.</p>
                                         )}
                                       </div>
                                     </div>
@@ -3322,15 +3320,15 @@ export default function App() {
                                             </div>
                                             <p className="mt-1 text-xs text-slate-500">{set.fields.length} logic points</p>
                                           </div>
-                                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
+                                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--paxio-bg-soft)] text-[var(--paxio-primary)]">
                                             <Network className="h-4 w-4" />
                                           </div>
                                         </div>
 
                                         <div className="mt-5 flex flex-1 flex-col justify-end gap-3 border-t border-stone-200 pt-4">
                                           {set.mdFileName ? (
-                                            <div className="flex items-center justify-between gap-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2">
-                                              <span className="truncate font-mono text-xs text-blue-700">{set.mdFileName}</span>
+                                            <div className="flex items-center justify-between gap-2 rounded-lg border border-[var(--paxio-border)] bg-[var(--paxio-bg-soft)] px-3 py-2">
+                                              <span className="truncate font-mono text-xs text-[var(--paxio-primary)]">{set.mdFileName}</span>
                                               <Button
                                                 onClick={() => {
                                                   const newSets = [...appSettings.attributeSets];
@@ -3414,7 +3412,7 @@ export default function App() {
                                               setNewAttrFields('');
                                               addLog('success', `Protocol registered: ${newAttrName}`);
                                             }}
-                                            className="w-full py-5 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl text-[11px] font-black uppercase tracking-[0.3em] transition-all shadow-2xl shadow-blue-900/40 active:scale-95 flex items-center justify-center gap-3 overflow-hidden group"
+                                            className="w-full py-5 bg-[var(--paxio-primary)] hover:bg-[var(--paxio-primary-hover)] text-white rounded-2xl text-[11px] font-black uppercase tracking-[0.3em] transition-all shadow-[var(--paxio-shadow-soft)] active:scale-95 flex items-center justify-center gap-3 overflow-hidden group"
                                           >
                                              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-700" />
                                              <Plus className="w-4 h-4 relative z-10" /> <span className="relative z-10">COMPILE SCHEMA</span>
@@ -3430,8 +3428,8 @@ export default function App() {
                                           <p className="text-[9px] text-white/30 uppercase tracking-[0.28em] font-black">Schema Hub Metrics</p>
                                           <h4 className="text-sm text-white/70 font-bold tracking-wide mt-2">Total Compiled Schemas</h4>
                                         </div>
-                                        <div className="px-5 py-2 bg-blue-600/10 border border-blue-500/20 rounded-2xl text-right">
-                                          <span className="text-2xl text-blue-400 font-black leading-none">{appSettings.attributeSets.length}</span>
+                                        <div className="px-5 py-2 bg-[var(--paxio-bg-soft)] border border-[var(--paxio-border)] rounded-2xl text-right">
+                                          <span className="text-2xl text-[var(--paxio-primary)] font-black leading-none">{appSettings.attributeSets.length}</span>
                                         </div>
                                       </div>
                                     </div>
@@ -3453,14 +3451,14 @@ export default function App() {
                                                   aria-expanded={isExpanded}
                                                   className="flex min-w-0 flex-1 items-center gap-4 rounded-lg text-left transition-colors hover:bg-stone-50 focus:outline-none focus:ring-2 focus:ring-blue-500/30"
                                                 >
-                                                  <div className="w-10 h-10 bg-blue-600/10 border border-blue-500/20 rounded-2xl flex shrink-0 items-center justify-center shadow-inner">
-                                                    <Layout className="w-5 h-5 text-blue-400" />
+                                                  <div className="w-10 h-10 bg-[var(--paxio-bg-soft)] border border-[var(--paxio-border)] rounded-2xl flex shrink-0 items-center justify-center shadow-inner">
+                                                    <Layout className="w-5 h-5 text-[var(--paxio-primary)]" />
                                                   </div>
                                                   <div className="min-w-0">
                                                     <span className="text-base font-black text-white tracking-tight leading-none block truncate">{set.name}</span>
                                                     <p className="mt-1 text-[9px] text-white/20 uppercase tracking-widest">{set.fields.length} Attribute Headers</p>
                                                   </div>
-                                                  <span className="ml-auto shrink-0 text-[10px] font-bold uppercase tracking-widest text-blue-500">
+                                                  <span className="ml-auto shrink-0 text-[10px] font-bold uppercase tracking-widest text-[var(--paxio-primary)]">
                                                     {isExpanded ? 'Hide' : 'Show'}
                                                   </span>
                                                 </button>
@@ -3475,7 +3473,7 @@ export default function App() {
                                                       setExpandedSchemaIdx(null);
                                                       persistSettings(updatedSettings);
                                                     }}
-                                                    className="p-2.5 bg-blue-600/10 hover:bg-blue-600 text-blue-400 hover:text-white rounded-xl transition-all"
+                                                    className="p-2.5 bg-[var(--paxio-bg-soft)] hover:bg-[var(--paxio-primary)] text-[var(--paxio-primary)] hover:text-white rounded-xl transition-all"
                                                     title="Modify Schema"
                                                     aria-label={`Modify schema ${set.name}`}
                                                   >
@@ -3502,7 +3500,7 @@ export default function App() {
                                                 <div className="border-t border-white/10 px-4 pb-4 pt-3">
                                                   <div className="flex flex-wrap gap-2.5">
                                                     {set.fields.map((f, i) => (
-                                                      <span key={i} className="px-4 py-1.5 bg-black/60 border border-white/10 rounded-xl text-[10px] text-white/50 font-mono hover:text-blue-400 hover:border-blue-500/40 transition-colors shadow-inner">
+                                                      <span key={i} className="px-4 py-1.5 bg-[var(--paxio-surface-raised)] border border-[var(--paxio-border)] rounded-xl text-[10px] text-slate-600 font-mono hover:text-[var(--paxio-primary)] hover:border-[var(--paxio-primary)] transition-colors shadow-inner">
                                                         {f}
                                                       </span>
                                                     ))}
@@ -3685,7 +3683,7 @@ export default function App() {
                              <div className="mb-2 flex items-center justify-between">
                                <span className="text-xs font-medium text-slate-600">Site Presets</span>
                                {selector ? (
-                                 <button onClick={() => setShowSaveDialog(true)} className="text-xs font-semibold text-blue-700 hover:text-blue-800">
+                                 <button onClick={() => setShowSaveDialog(true)} className="text-xs font-semibold text-[var(--paxio-primary)] hover:text-[var(--paxio-primary-hover)]">
                                    Save selector
                                  </button>
                                ) : null}
@@ -3718,7 +3716,7 @@ export default function App() {
                                  role="switch"
                                  aria-checked={enabled as boolean}
                                  onClick={() => (setter as React.Dispatch<React.SetStateAction<boolean>>)(!(enabled as boolean))}
-                                 className={`rounded-lg border p-3 text-left transition-colors ${enabled ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-stone-200 bg-stone-50 text-slate-600'}`}
+                                 className={`rounded-lg border p-3 text-left transition-colors ${enabled ? 'border-[var(--paxio-primary)] bg-[var(--paxio-bg-soft)] text-[var(--paxio-primary)]' : 'border-[var(--paxio-border)] bg-[var(--paxio-surface)] text-slate-600'}`}
                                >
                                  <span className="text-xs font-semibold">{label as string}</span>
                                </button>
@@ -3731,7 +3729,7 @@ export default function App() {
                              <Plus className="h-3.5 w-3.5" /> Add Secondary Target
                            </Button>
                          ) : (
-                           <div className="rounded-lg border border-stone-200 bg-stone-50 p-4">
+                             <div className="dashboard-card-muted p-4">
                              <div className="mb-4 flex items-center justify-between">
                                <div>
                                  <h3 className="text-sm font-semibold text-slate-950">Secondary target</h3>
@@ -3771,8 +3769,8 @@ export default function App() {
                        <>
                          <div className="grid gap-4 lg:grid-cols-[1fr_1.2fr]">
                            <div className="space-y-3">
-                             <label className="relative flex min-h-44 cursor-pointer flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-stone-300 bg-stone-50 p-5 text-center hover:border-blue-400 hover:bg-blue-50">
-                               <Upload className="h-7 w-7 text-blue-700" />
+                             <label className="upload-zone min-h-44">
+                               <Upload className="h-7 w-7 text-[var(--paxio-primary)]" />
                                <span className="text-sm font-semibold text-slate-950">{batchFile ? batchFile.name : 'Upload batch manifest'}</span>
                                <span className="text-xs text-slate-500">Excel columns: SKU, URL</span>
                                <input type="file" onChange={handleBatchUpload} accept=".xlsx" aria-label="Upload batch manifest XLSX" className="absolute inset-0 cursor-pointer opacity-0" />
@@ -3791,7 +3789,7 @@ export default function App() {
                              <div>
                                <div className="mb-2 flex items-center justify-between">
                                  <span className="text-xs font-medium text-slate-600">Site Presets</span>
-                                 {selector ? <button onClick={() => setShowSaveDialog(true)} className="text-xs font-semibold text-blue-700 hover:text-blue-800">Save selector</button> : null}
+                                 {selector ? <button onClick={() => setShowSaveDialog(true)} className="text-xs font-semibold text-[var(--paxio-primary)] hover:text-[var(--paxio-primary-hover)]">Save selector</button> : null}
                                </div>
                                <PresetDropdown
                                  presets={savedSelectors}
@@ -3811,7 +3809,7 @@ export default function App() {
                              </Select>
                            </div>
                          </div>
-                         <div className="rounded-lg border border-stone-200 bg-stone-50 p-4">
+                         <div className="dashboard-card-muted p-4">
                            <div className="responsive-toolbar">
                              <div>
                                <h3 className="text-sm font-semibold text-slate-950">Recent batch results</h3>
@@ -3821,9 +3819,9 @@ export default function App() {
                            </div>
                            <div className="mt-3 grid max-h-64 gap-2 overflow-y-auto custom-scrollbar md:grid-cols-2">
                              {harvestFiles.length === 0 ? (
-                               <div className="rounded-lg border border-dashed border-stone-300 bg-white p-4 text-center text-xs text-slate-500">No harvest assets found</div>
+                               <div className="rounded-lg border border-dashed border-[var(--paxio-border)] bg-[var(--paxio-surface)] p-4 text-center text-xs text-slate-500">No harvest assets found</div>
                              ) : harvestFiles.map((file: any, idx: number) => (
-                               <div key={idx} className="flex items-center justify-between gap-3 rounded-lg border border-stone-200 bg-white p-3">
+                               <div key={idx} className="flex items-center justify-between gap-3 rounded-lg border border-[var(--paxio-border)] bg-[var(--paxio-surface)] p-3">
                                  <div className="min-w-0">
                                    <div className="truncate font-mono text-xs font-semibold text-slate-800">{file.name}</div>
                                    <div className="mt-1 text-xs text-slate-500">{(file.size / 1024).toFixed(1)} KB</div>
@@ -3842,7 +3840,7 @@ export default function App() {
                            <div>
                              <div className="mb-2 flex items-center justify-between">
                                <span className="text-xs font-medium text-slate-600">PLP Presets</span>
-                               {plpSelector ? <button onClick={() => setShowSavePlpDialog(true)} className="text-xs font-semibold text-blue-700 hover:text-blue-800">Save selector</button> : null}
+                               {plpSelector ? <button onClick={() => setShowSavePlpDialog(true)} className="text-xs font-semibold text-[var(--paxio-primary)] hover:text-[var(--paxio-primary-hover)]">Save selector</button> : null}
                              </div>
                              <PresetDropdown
                                presets={savedPlpSelectors}
@@ -3864,7 +3862,7 @@ export default function App() {
                            <div>
                              <div className="mb-2 flex items-center justify-between">
                                <span className="text-xs font-medium text-slate-600">Site Presets</span>
-                               {selector ? <button onClick={() => setShowSaveDialog(true)} className="text-xs font-semibold text-blue-700 hover:text-blue-800">Save selector</button> : null}
+                               {selector ? <button onClick={() => setShowSaveDialog(true)} className="text-xs font-semibold text-[var(--paxio-primary)] hover:text-[var(--paxio-primary-hover)]">Save selector</button> : null}
                              </div>
                              <PresetDropdown
                                presets={savedSelectors}
@@ -3887,7 +3885,7 @@ export default function App() {
                              role="switch"
                              aria-checked={screenshotEnabled}
                              onClick={() => setScreenshotEnabled(!screenshotEnabled)}
-                             className={`rounded-lg border p-3 text-left transition-colors ${screenshotEnabled ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-stone-200 bg-stone-50 text-slate-600'}`}
+                             className={`rounded-lg border p-3 text-left transition-colors ${screenshotEnabled ? 'border-[var(--paxio-primary)] bg-[var(--paxio-bg-soft)] text-[var(--paxio-primary)]' : 'border-[var(--paxio-border)] bg-[var(--paxio-surface)] text-slate-600'}`}
                            >
                              <span className="text-xs font-semibold">Visual Context</span>
                              <span className="mt-1 block text-xs">Capture screenshots</span>
@@ -3898,7 +3896,7 @@ export default function App() {
 
                      <AnimatePresence>
                        {showSaveDialog && (
-                         <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }} className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+                         <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }} className="rounded-lg border border-[var(--paxio-border)] bg-[var(--paxio-bg-soft)] p-4">
                            <Input autoFocus label="Site Preset Name" type="text" value={tempSelectorName} onChange={(e) => setTempSelectorName(e.target.value)} placeholder="e.g. Tech Specs Profile" className="text-xs" />
                            <div className="mt-3 flex gap-2">
                              <Button onClick={saveSelector} size="sm">Save</Button>
@@ -3909,7 +3907,7 @@ export default function App() {
                      </AnimatePresence>
                      <AnimatePresence>
                        {showSavePlpDialog && (
-                         <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }} className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+                         <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }} className="rounded-lg border border-[var(--paxio-border)] bg-[var(--paxio-bg-soft)] p-4">
                            <Input autoFocus label="PLP Preset Name" type="text" value={tempPlpSelectorName} onChange={(e) => setTempPlpSelectorName(e.target.value)} placeholder="e.g. My Category List" className="text-xs" />
                            <div className="mt-3 flex gap-2">
                              <Button onClick={savePlpSelector} size="sm">Save</Button>
@@ -3950,7 +3948,7 @@ export default function App() {
                  </Card>
 
                  <aside className="xl:sticky xl:top-6 xl:col-start-2 xl:row-span-2 xl:row-start-1 xl:self-start">
-                   <Card padded={false} className={`terminal-card flex h-[320px] flex-col overflow-hidden transition-all xl:h-[calc(100vh-9rem)] ${isScraping ? 'ring-1 ring-blue-500/20' : ''}`}>
+                   <Card padded={false} className={`terminal-card flex h-[320px] flex-col overflow-hidden transition-all xl:h-[calc(100vh-9rem)] ${isScraping ? 'ring-1 ring-[var(--paxio-primary)]/25' : ''}`}>
                     <div className="min-h-10 border-b border-white/10 flex flex-wrap items-center px-4 py-2 justify-between gap-2 bg-white/[0.02]">
                        <div className="flex items-center gap-2"><Terminal className="w-3 h-3 text-blue-300" /><span className="text-[10px] font-mono text-white/65 uppercase tracking-widest">Live Progress</span></div>
                        <div className="flex items-center gap-2">
@@ -3985,9 +3983,9 @@ export default function App() {
 
                  <div className="flex min-h-0 flex-col xl:col-start-1 xl:row-start-2">
                     {discoveryMode && discoveredLinks.length > 0 && (
-                      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 rounded-xl border border-blue-500/20 bg-blue-500/5 flex flex-col overflow-hidden max-h-72">
-                         <div className="min-h-12 border-b border-blue-500/20 px-4 py-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                            <span className="text-[10px] font-bold text-blue-400 uppercase tracking-widest">Target Discovery: {discoveredLinks.length} items found</span>
+                      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 rounded-xl border border-[var(--paxio-border)] bg-[var(--paxio-surface-glass)] shadow-[var(--paxio-shadow-soft)] flex flex-col overflow-hidden max-h-72">
+                         <div className="min-h-12 border-b border-[var(--paxio-border)] px-4 py-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                            <span className="text-[10px] font-bold text-[var(--paxio-primary)] uppercase tracking-widest">Target Discovery: {discoveredLinks.length} items found</span>
                             <div className="responsive-actions">
                                <Badge tone={selectedLinks.length > 0 ? 'blue' : 'neutral'}>{selectedLinks.length} selected</Badge>
                                <Button onClick={() => setSelectedLinks(discoveredLinks.map(l => l.href))} variant="ghost" size="sm">Select All</Button>
@@ -3999,12 +3997,12 @@ export default function App() {
                          </div>
                          <div className="flex-1 overflow-y-auto p-2 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-1 custom-scrollbar">
                             {discoveredLinks.map((link, idx) => (
-                              <button key={idx} type="button" aria-pressed={selectedLinks.includes(link.href)} onClick={() => setSelectedLinks(prev => prev.includes(link.href) ? prev.filter(h => h !== link.href) : [...prev, link.href])} className={`flex items-center justify-between p-2 rounded border transition-all text-left focus:outline-none focus:ring-2 focus:ring-blue-500/40 ${selectedLinks.includes(link.href) ? 'bg-blue-600/20 border-blue-500/40' : 'bg-black/20 border-white/5 hover:border-white/10'}`}>
+                              <button key={idx} type="button" aria-pressed={selectedLinks.includes(link.href)} onClick={() => setSelectedLinks(prev => prev.includes(link.href) ? prev.filter(h => h !== link.href) : [...prev, link.href])} className={`flex items-center justify-between p-2 rounded border transition-all text-left focus:outline-none focus:ring-2 focus:ring-[var(--paxio-accent)]/45 ${selectedLinks.includes(link.href) ? 'bg-[var(--paxio-bg-soft)] border-[var(--paxio-primary)]' : 'bg-[var(--paxio-surface)] border-[var(--paxio-border)] hover:border-[var(--paxio-primary)]'}`}>
                                 <div className="truncate flex-1 pr-2">
-                                  <div className="text-[10px] font-medium text-white truncate">{link.text || 'Target Product'}</div>
-                                  <div className="text-[8px] text-white/30 truncate font-mono">{link.href}</div>
+                                  <div className="text-[10px] font-medium text-slate-900 truncate">{link.text || 'Target Product'}</div>
+                                  <div className="text-[8px] text-slate-500 truncate font-mono">{link.href}</div>
                                 </div>
-                                <div className={`w-3 h-3 rounded transition-colors flex items-center justify-center shrink-0 ${selectedLinks.includes(link.href) ? 'bg-blue-500' : 'border border-white/20'}`}>{selectedLinks.includes(link.href) && <Check className="w-2 h-2 text-white" />}</div>
+                                <div className={`w-3 h-3 rounded transition-colors flex items-center justify-center shrink-0 ${selectedLinks.includes(link.href) ? 'bg-[var(--paxio-primary)]' : 'border border-[var(--paxio-border)]'}`}>{selectedLinks.includes(link.href) && <Check className="w-2 h-2 text-white" />}</div>
                               </button>
                             ))}
                          </div>
@@ -4201,12 +4199,12 @@ export default function App() {
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
                     {[
                       ['Total SKUs', jobsTotal ?? jobs.length, 'Jobs in the current queue', 'neutral'],
-                      ['Ready for mapping', readyMappingJobCount, 'Can run Map AI now', 'blue'],
-                      ['In progress', inProgressJobCount, 'Queued or running jobs', 'blue'],
+                      ['Ready for mapping', readyMappingJobCount, 'Can run Map AI now', 'neutral'],
+                      ['In progress', inProgressJobCount, 'Queued or running jobs', 'amber'],
                       ['Completed outputs', completedJobCount, 'Output JSON available', 'green'],
                       ['Failed or pending', failedJobCount + pendingJobCount, 'Needs attention', failedJobCount > 0 ? 'red' : 'amber'],
                     ].map(([label, value, help, tone]) => (
-                      <Card key={label as string} className="p-4">
+                      <Card key={label as string} className="flex h-full flex-col justify-between p-4">
                         <Badge tone={tone as any}>{label}</Badge>
                         <div className="mt-2 text-2xl font-semibold text-slate-950">{value}</div>
                         <div className="mt-1 text-xs leading-relaxed text-slate-500">{help}</div>
@@ -4240,7 +4238,7 @@ export default function App() {
                          <div className="flex items-center">
                            <input 
                              type="checkbox" 
-                             className="w-3 h-3 cursor-pointer outline-none accent-blue-500"
+                             className="w-3 h-3 cursor-pointer outline-none accent-[var(--paxio-primary)]"
                              aria-label="Select all visible jobs"
                              checked={jobs.length > 0 && selectedJobs.length === jobs.length}
                              onChange={(e) => {
@@ -4268,7 +4266,7 @@ export default function App() {
                                <div className="flex items-center">
                                  <input 
                                    type="checkbox" 
-                                   className="w-3 h-3 cursor-pointer outline-none accent-blue-500"
+                                   className="w-3 h-3 cursor-pointer outline-none accent-[var(--paxio-primary)]"
                                    aria-label={`Select job ${job.sku}`}
                                    checked={selectedJobs.includes(job.sku)}
                                    onChange={(e) => {
@@ -4277,7 +4275,7 @@ export default function App() {
                                    }}
                                  />
                                </div>
-                               <div className="font-mono text-sm font-semibold text-blue-700">{job.sku}</div>
+                               <div className="font-mono text-sm font-semibold text-[var(--paxio-primary)]">{job.sku}</div>
                                <div className="truncate text-xs font-medium text-slate-600">{jobAttributeSet || 'Default'}</div>
                                <div className="flex flex-col justify-center gap-1 text-xs">
                                  {job.harvestFile && (
@@ -4285,7 +4283,7 @@ export default function App() {
                                      <Badge tone="green" className="rounded-md">Harvest</Badge>
                                      <button
                                        onClick={() => openHarvestFile(job.harvestFile!, 'job harvest')}
-                                       className="flex h-5 w-5 items-center justify-center rounded bg-blue-50 text-blue-700 transition-colors hover:bg-blue-100"
+                                       className="flex h-5 w-5 items-center justify-center rounded bg-[var(--paxio-bg-soft)] text-[var(--paxio-primary)] transition-colors hover:bg-[var(--paxio-primary)] hover:text-white"
                                        title="Open Harvest File"
                                        aria-label={`Open harvest file for ${job.sku}`}
                                      >
@@ -4304,7 +4302,7 @@ export default function App() {
                                  {job.hasPdf && (
                                    <div className="flex items-center gap-2">
                                      <Badge tone="blue" className="rounded-md">PDF</Badge>
-                                     <button onClick={() => handleViewPdf(job.sku)} className="flex h-5 w-5 items-center justify-center rounded bg-blue-50 text-blue-700 transition-colors hover:bg-blue-100" title="View PDF Extracted Text" aria-label={`View PDF text for ${job.sku}`}><FileText className="w-3 h-3" /></button>
+                                     <button onClick={() => handleViewPdf(job.sku)} className="flex h-5 w-5 items-center justify-center rounded bg-sky-50 text-sky-700 transition-colors hover:bg-sky-100" title="View PDF Extracted Text" aria-label={`View PDF text for ${job.sku}`}><FileText className="w-3 h-3" /></button>
                                    </div>
                                  )}
                                {job.hasSapData && (
@@ -4315,8 +4313,8 @@ export default function App() {
                                {!job.harvestFile && !job.hasPdf && !job.hasSapData && <Badge tone="neutral" className="rounded-md">No source</Badge>}
                               </div>
                               <div className="flex items-center gap-2">
-                                 <Badge tone={job.status === 'completed' ? 'green' : job.status === 'failed' ? 'red' : job.status === 'pending' ? 'amber' : job.status === 'ready' || job.status === 'queued' || job.status === 'running' ? 'blue' : 'neutral'} className="rounded-md">
-                                   <span className={`h-1.5 w-1.5 rounded-full ${job.status === 'completed' ? 'bg-emerald-400' : job.status === 'ready' ? 'bg-blue-400 animate-pulse' : 'bg-white/30'}`} />
+                                <Badge tone={job.status === 'completed' ? 'green' : job.status === 'failed' ? 'red' : job.status === 'pending' ? 'amber' : 'neutral'} className="rounded-md">
+                                  <span className={`h-1.5 w-1.5 rounded-full ${job.status === 'completed' ? 'bg-emerald-400' : job.status === 'ready' ? 'bg-[var(--paxio-primary)] animate-pulse' : 'bg-white/30'}`} />
                                    {job.status}
                                  </Badge>
                                  <Badge tone={job.status === 'completed' ? 'green' : 'neutral'} className="rounded-md">
@@ -4347,7 +4345,7 @@ export default function App() {
                                  {job.status === 'completed' ? (
                                    <button 
                                      onClick={() => fetchOutput(job.sku)}
-                                     className="rounded-lg border border-blue-200 bg-blue-50 p-2 text-blue-700 transition-colors hover:bg-blue-100"
+                                     className="rounded-lg border border-[var(--paxio-border)] bg-[var(--paxio-bg-soft)] p-2 text-[var(--paxio-primary)] transition-colors hover:bg-[var(--paxio-primary)] hover:text-white"
                                      title="View/Edit Output"
                                      aria-label={`View or edit output for ${job.sku}`}
                                    >
@@ -4360,7 +4358,7 @@ export default function App() {
                                          value={jobAiModels[job.sku] || DEFAULT_MAP_AI_MODELS[0]}
                                          onChange={(e) => setJobAiModels({...jobAiModels, [job.sku]: e.target.value})}
                                          aria-label={`AI model for ${job.sku}`}
-                                         className="h-[30px] rounded-md border border-stone-300 bg-white px-2 py-1 text-xs text-slate-700 outline-none transition-all focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                         className="h-[30px] rounded-md border border-[var(--paxio-border)] bg-[var(--paxio-surface)] px-2 py-1 text-xs text-slate-800 outline-none transition-all focus:border-[var(--paxio-primary)] focus:ring-2 focus:ring-[var(--paxio-accent)]/30"
                                        >
                                          {DEFAULT_MAP_AI_MODELS.map((model) => (
                                            <option key={model} value={model}>{model}</option>
@@ -4374,7 +4372,7 @@ export default function App() {
                                            onChange={(e) => setCustomJobAiModels({...customJobAiModels, [job.sku]: e.target.value})}
                                            placeholder="provider/model-id"
                                           aria-label={`Custom AI model for ${job.sku}`}
-                                          className="h-[30px] w-44 rounded-md border border-stone-300 bg-white px-2 py-1 text-xs font-mono text-slate-700 outline-none transition-all placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                                          className="h-[30px] w-44 rounded-md border border-[var(--paxio-border)] bg-[var(--paxio-surface)] px-2 py-1 text-xs font-mono text-slate-800 outline-none transition-all placeholder:text-slate-500 focus:border-[var(--paxio-primary)] focus:ring-2 focus:ring-[var(--paxio-accent)]/30"
                                          />
                                        )}
                                        <button aria-label={`Run AI mapping for ${job.sku}`} onClick={async () => {
@@ -4408,7 +4406,7 @@ export default function App() {
                                             addLog('success', `SKU ${job.sku} mapping cycle complete.`);
                                             fetchJobs();
                                           } catch (e: any) { addLog('error', `Mapping failed for ${job.sku}: ${e.message}`); }
-                                       }} className="flex h-[30px] items-center rounded-md bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-blue-700">Map AI</button>
+                                       }} className="flex h-[30px] items-center rounded-md bg-[var(--paxio-primary)] px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-[var(--paxio-primary-hover)]">Map AI</button>
                                      </div>
                                   ))}
                                  </div>
@@ -4452,14 +4450,14 @@ export default function App() {
                            key={job.sku}
                            type="button"
                            onClick={() => setReviewSku(job.sku)}
-                           className={`mb-2 w-full rounded-lg border p-3 text-left transition-colors ${active ? 'border-blue-200 bg-blue-50' : 'border-stone-200 bg-white hover:border-blue-200 hover:bg-blue-50/50'}`}
+                           className={`mb-2 w-full rounded-lg border p-3 text-left transition-colors ${active ? 'border-[var(--paxio-primary)] bg-[var(--paxio-bg-soft)] shadow-sm' : 'border-[var(--paxio-border)] bg-[var(--paxio-surface)] hover:border-[var(--paxio-primary)] hover:bg-[var(--paxio-bg-soft)]/70'}`}
                          >
                            <div className="flex items-start justify-between gap-3">
                              <div className="min-w-0">
-                               <div className="font-mono text-sm font-semibold text-blue-700">{job.sku}</div>
+                               <div className="font-mono text-sm font-semibold text-[var(--paxio-primary)]">{job.sku}</div>
                                <div className="mt-1 truncate text-sm text-slate-600">{job.title || 'Unknown product'}</div>
                              </div>
-                             <Badge tone={job.status === 'completed' ? 'green' : job.status === 'failed' ? 'red' : job.status === 'ready' ? 'blue' : 'neutral'}>{job.status}</Badge>
+                            <Badge tone={job.status === 'completed' ? 'green' : job.status === 'failed' ? 'red' : 'neutral'}>{job.status}</Badge>
                            </div>
                          </button>
                        );
@@ -4491,7 +4489,7 @@ export default function App() {
                      </div>
 
                      <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
-                       <Card className="p-4"><div className="text-xs text-slate-500">Status</div><div className="mt-2"><Badge tone={selectedReviewJob.status === 'completed' ? 'green' : selectedReviewJob.status === 'failed' ? 'red' : selectedReviewJob.status === 'ready' ? 'blue' : 'neutral'}>{selectedReviewJob.status}</Badge></div></Card>
+                      <Card className="p-4"><div className="text-xs text-slate-500">Status</div><div className="mt-2"><Badge tone={selectedReviewJob.status === 'completed' ? 'green' : selectedReviewJob.status === 'failed' ? 'red' : 'neutral'}>{selectedReviewJob.status}</Badge></div></Card>
                        <Card className="p-4"><div className="text-xs text-slate-500">Attribute set</div><div className="mt-2 text-sm font-semibold text-slate-950">{readSkuAttributeSetForDisplay(selectedReviewJob) || 'Default'}</div></Card>
                        <Card className="p-4"><div className="text-xs text-slate-500">Retry count</div><div className="mt-2 text-2xl font-semibold text-slate-950">{(selectedReviewJob as any).retryCount ?? 0}</div></Card>
                        <Card className="p-4"><div className="text-xs text-slate-500">Output</div><div className="mt-2"><Badge tone={selectedReviewJob.status === 'completed' ? 'green' : 'neutral'}>{selectedReviewJob.status === 'completed' ? 'Available' : 'Not ready'}</Badge></div></Card>
@@ -4568,7 +4566,7 @@ export default function App() {
                       ['SAP truth source', sapSourceCount, 'Rows with sap_data/source SAP'],
                       ['Source/PDF context', urlSourceCount + batchData.length + pdfSourceCount, 'URLs and attached PDF rows'],
                     ].map(([label, value, help]) => (
-                      <Card key={label as string} className="p-4">
+                      <Card key={label as string} className="flex h-full flex-col justify-between p-4">
                         <div className="text-sm font-medium text-slate-500">{label}</div>
                         <div className="mt-2 text-3xl font-semibold text-slate-950">{value}</div>
                         <div className="mt-1 text-xs text-slate-500">{help}</div>
@@ -4601,7 +4599,7 @@ export default function App() {
                         <div className="grid gap-3">
                           <div className="upload-zone group min-h-52">
                             <input type="file" onChange={handleSkuUpload} accept=".xlsx" aria-label="Upload SKU master index XLSX" className="absolute inset-0 opacity-0 cursor-pointer" />
-                            <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-blue-700">
+                            <div className="rounded-lg border border-[var(--paxio-border)] bg-[var(--paxio-bg-soft)] p-3 text-[var(--paxio-primary)]">
                               <FileSpreadsheet className="h-7 w-7" />
                             </div>
                             <div>
@@ -4627,7 +4625,7 @@ export default function App() {
                             ))}
                           </Select>
 
-                          <div className="rounded-lg border border-stone-200 bg-stone-50 p-4">
+                          <div className="dashboard-card-muted p-4">
                             <div className="responsive-toolbar">
                               <div>
                                 <p className="text-sm font-semibold text-slate-950">Batch source URLs</p>
@@ -4637,7 +4635,7 @@ export default function App() {
                                 Download batch template
                               </Button>
                             </div>
-                            <label className="relative mt-4 flex cursor-pointer items-center justify-between rounded-lg border border-dashed border-stone-300 bg-white px-3 py-3 text-sm text-slate-700 hover:border-blue-400 hover:bg-blue-50">
+                            <label className="relative mt-4 flex cursor-pointer items-center justify-between rounded-lg border border-dashed border-[var(--paxio-border)] bg-[var(--paxio-surface)] px-3 py-3 text-sm text-slate-700 hover:border-[var(--paxio-primary)] hover:bg-[var(--paxio-bg-soft)]">
                               <span>{batchFile ? batchFile.name : 'Choose batch manifest'}</span>
                               <Upload className="h-4 w-4 text-slate-400" />
                               <input type="file" onChange={handleBatchUpload} accept=".xlsx" aria-label="Upload batch manifest XLSX" className="absolute inset-0 opacity-0 cursor-pointer" />
@@ -4743,9 +4741,9 @@ export default function App() {
                           const skuValue = (sku.sku || sku.SKU || `SKU-${i + 1}`).toString();
                           const skuAttributeSet = readSkuAttributeSetForDisplay(sku);
                           return (
-                            <div key={`${skuValue}-${i}`} className="grid gap-3 px-5 py-4 md:grid-cols-[1.2fr_0.9fr_1fr_1fr_auto] md:items-center">
+                            <div key={`${skuValue}-${i}`} className="grid gap-3 px-5 py-4 transition-colors hover:bg-[var(--paxio-bg-soft)]/70 md:grid-cols-[1.2fr_0.9fr_1fr_1fr_auto] md:items-center">
                               <div>
-                                <div className="font-mono text-sm font-semibold text-blue-700">{skuValue}</div>
+                                <div className="font-mono text-sm font-semibold text-[var(--paxio-primary)]">{skuValue}</div>
                                 <div className="mt-1 text-sm text-slate-500">{sku.title || sku.Name || sku.brand || sku.Brand || 'Unlabeled record'}</div>
                               </div>
                               <Badge tone={skuAttributeSet ? 'blue' : 'neutral'}>{skuAttributeSet || 'Default attribute set'}</Badge>
@@ -4799,7 +4797,7 @@ export default function App() {
                           value={imageSku}
                           onChange={(e) => setImageSku(e.target.value)}
                           placeholder="e.g. LAP-100"
-                          className="font-mono text-blue-400"
+                          className="font-mono"
                           label="SKU ID"
                           error={!imageSku.trim() ? 'Required before sourcing an image.' : undefined}
                         />
@@ -4826,7 +4824,7 @@ export default function App() {
                          id="imageScreenshotEnable"
                          checked={imageScreenshotEnabled}
                          onChange={(e) => setImageScreenshotEnabled(e.target.checked)}
-                         className="rounded border-stone-300 text-blue-600 focus:ring-blue-500/20"
+                         className="rounded border-[var(--paxio-border)] text-[var(--paxio-primary)] focus:ring-[var(--paxio-accent)]/30"
                        />
                        <label htmlFor="imageScreenshotEnable" className="cursor-pointer text-sm text-slate-600">
                          Capture full page screenshot for debugging
@@ -4865,7 +4863,7 @@ export default function App() {
                           return (
                             <div
                               key={idx}
-                              className={`rounded-lg border px-4 py-3 text-left transition-all ${isActive ? 'border-emerald-300 bg-emerald-50 ring-2 ring-emerald-100' : 'border-stone-200 bg-white hover:border-emerald-300 hover:bg-emerald-50/50'} ${loadingHarvestFile ? 'opacity-60 cursor-not-allowed' : ''}`}
+                              className={`rounded-lg border px-4 py-3 text-left transition-all ${isActive ? 'border-emerald-300 bg-emerald-50 ring-2 ring-emerald-100' : 'border-[var(--paxio-border)] bg-[var(--paxio-surface)] hover:border-emerald-300 hover:bg-emerald-50/50'} ${loadingHarvestFile ? 'opacity-60 cursor-not-allowed' : ''}`}
                             >
                               <div className="text-xs font-semibold text-emerald-700">{deriveHarvestSku(file.name)}</div>
                               <div className="mt-2 truncate font-mono text-xs text-slate-700">{file.name}</div>
@@ -4894,7 +4892,7 @@ export default function App() {
                     )}
                   </div>
 
-                  <div className="rounded-lg border border-stone-200 bg-white p-5 space-y-4 shadow-sm">
+                  <div className="dashboard-card space-y-4 p-5">
                     <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                       <div>
                         <h3 className="text-base font-semibold text-slate-950">Scraped image URLs</h3>
@@ -4965,7 +4963,7 @@ export default function App() {
                               type="button"
                               onClick={() => toggleImageSelection(src)}
                               disabled={isDisabled}
-                              className={`w-full text-left rounded-lg border transition-all overflow-hidden group ${isSelected ? 'border-blue-300 bg-blue-50 ring-2 ring-blue-100' : 'border-stone-200 bg-white hover:border-blue-200 hover:bg-blue-50/40'} ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}`}
+                              className={`w-full text-left rounded-lg border transition-all overflow-hidden group ${isSelected ? 'border-[var(--paxio-primary)] bg-[var(--paxio-bg-soft)] ring-2 ring-[var(--paxio-accent)]/25' : 'border-[var(--paxio-border)] bg-[var(--paxio-surface)] hover:border-[var(--paxio-primary)] hover:bg-[var(--paxio-bg-soft)]/70'} ${isDisabled ? 'opacity-45 cursor-not-allowed' : ''}`}
                             >
                               <div className="p-4 flex items-start gap-4">
                                 <div className="relative shrink-0 w-20 h-20 rounded-lg overflow-hidden border border-stone-200 bg-stone-50">
@@ -4999,7 +4997,7 @@ export default function App() {
                                   </div>
                                   <div className="break-all font-mono text-xs leading-relaxed text-slate-700">{src}</div>
                                 </div>
-                                <div className={`shrink-0 w-7 h-7 rounded-full border flex items-center justify-center transition-colors ${isSelected ? 'bg-blue-600 border-blue-600 text-white' : 'bg-white border-stone-300 text-slate-300 group-hover:text-blue-600'}`}>
+                                <div className={`shrink-0 w-7 h-7 rounded-full border flex items-center justify-center transition-colors ${isSelected ? 'bg-[var(--paxio-primary)] border-[var(--paxio-primary)] text-white' : 'bg-[var(--paxio-surface)] border-[var(--paxio-border)] text-slate-300 group-hover:text-[var(--paxio-primary)]'}`}>
                                   {isSelected && <Check className="w-4 h-4" />}
                                 </div>
                               </div>
@@ -5022,7 +5020,7 @@ export default function App() {
                     ) : (
                       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-6">
                         {extractedImages.map((img, i) => (
-                           <div key={i} className="relative overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm group">
+                           <div key={i} className="relative overflow-hidden rounded-lg border border-[var(--paxio-border)] bg-[var(--paxio-surface)] shadow-sm group">
                              <div className="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100 transition-opacity">
                                <button 
                                  onClick={() => handleImageDelete(img.sku)}
@@ -5036,7 +5034,7 @@ export default function App() {
                                <div className="relative flex aspect-square items-center justify-center bg-white p-4">
                                  <img src={img.imagePath} alt={img.sku} className="max-w-full max-h-full object-contain" />
                                  <div className="absolute inset-0 bg-black/80 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-                                   <a href={img.imagePath} download={`${img.sku}.jpg`} className="rounded-lg bg-blue-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-blue-700">Download image</a>
+                                   <a href={img.imagePath} download={`${img.sku}.jpg`} className="rounded-lg bg-[var(--paxio-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-[var(--paxio-primary-hover)]">Download image</a>
                                  </div>
                                </div>
                              ) : (
@@ -5045,7 +5043,7 @@ export default function App() {
                                </div>
                              )}
                              <div className="flex flex-col gap-1 border-t border-stone-200 p-4">
-                               <span className="font-mono text-xs font-semibold text-blue-700">{img.sku}</span>
+                               <span className="font-mono text-xs font-semibold text-[var(--paxio-primary)]">{img.sku}</span>
                                <a href={img.originalUrl} target="_blank" rel="noopener noreferrer" className="truncate text-xs text-slate-500 hover:text-slate-900">Original source</a>
                                {img.screenshotPath && (
                                  <a href={img.screenshotPath} target="_blank" rel="noopener noreferrer" className="text-[9px] text-cyan-400 hover:text-cyan-300 truncate inline-flex items-center gap-1 mt-1">
