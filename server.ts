@@ -40,6 +40,7 @@ import {
   DiscoverRequestSchema,
   AnalyzeRequestSchema,
   ImageExtractRequestSchema,
+  ImageMetadataRequestSchema,
   SKUIndexRequestSchema,
   SettingsRequestSchema,
   LoginRequestSchema,
@@ -2869,6 +2870,36 @@ async function startServer() {
       console.error("[IMAGE SOURCER] Error:", error);
       res.status(error?.statusCode || 500).json({ error: "Failed to extract image", details: error.message });
     }
+  });
+
+  app.post("/api/images/metadata", requireAuth, validateRequest(ImageMetadataRequestSchema), async (req, res) => {
+    const requestedUrls = Array.isArray(req.body?.urls) ? req.body.urls : [];
+    const uniqueUrls: string[] = Array.from(new Set<string>(requestedUrls.map((url: string) => sanitizeUrl(url)))).slice(0, 50);
+
+    const images = await Promise.all(uniqueUrls.map(async (url) => {
+      try {
+        const response = await fetchSafeExternal(url, { method: 'HEAD' });
+        const contentType = response.headers.get('content-type') || '';
+        const length = Number(response.headers.get('content-length') || 0);
+
+        return {
+          url,
+          bytes: Number.isFinite(length) && length > 0 ? length : null,
+          contentType,
+          ok: response.ok && (!contentType || (contentType.startsWith('image/') && !contentType.includes('svg'))),
+        };
+      } catch (error: any) {
+        return {
+          url,
+          bytes: null,
+          contentType: '',
+          ok: false,
+          error: error?.message || 'metadata unavailable',
+        };
+      }
+    }));
+
+    res.json({ images });
   });
 
   app.post("/api/images/render", requireAuth, async (req, res) => {

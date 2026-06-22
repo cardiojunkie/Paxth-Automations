@@ -23,6 +23,8 @@ if [ ! -f "$ALLOWLIST_PATH" ]; then
 fi
 
 mkdir -p "$APP_ROOT/harvest" "$APP_ROOT/jobs" "$APP_ROOT/outputs" "$APP_ROOT/images" "$APP_ROOT/sku-index" "$APP_ROOT/settings"
+chown -R 1001:1001 "$APP_ROOT/harvest" "$APP_ROOT/jobs" "$APP_ROOT/outputs" "$APP_ROOT/images" "$APP_ROOT/sku-index" "$APP_ROOT/settings"
+chmod -R ug+rwX "$APP_ROOT/harvest" "$APP_ROOT/jobs" "$APP_ROOT/outputs" "$APP_ROOT/images" "$APP_ROOT/sku-index" "$APP_ROOT/settings"
 
 cd "$DEPLOY_DIR"
 

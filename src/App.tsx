@@ -9,7 +9,7 @@ import type { SkuRecord, HarvestFile, Job } from "./types";
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Activity, Beaker, Box, Cpu, Database, ExternalLink, Flame, Info, Layout, Play, Terminal, Zap, Loader2, X, Maximize2, Copy, Check, Eye, AlertCircle, FileSpreadsheet, Upload, Settings, Briefcase, Search, FileText, Globe, Key, List, AlignLeft, Plus, Archive, Trash2, RefreshCw, Network, Image as ImageIcon } from 'lucide-react';
+import { Activity, Beaker, Box, Cpu, Database, ExternalLink, Flame, Info, Layout, Play, Terminal, Zap, Loader2, X, Maximize2, Copy, Check, Eye, FileSpreadsheet, Upload, Settings, Briefcase, Search, FileText, Globe, Key, List, AlignLeft, Plus, Archive, Trash2, RefreshCw, Network, Image as ImageIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import React, { useState, useRef, useEffect } from 'react';
 
@@ -82,7 +82,7 @@ interface HarvestEditorEntry {
   openedAt: string;
 }
 
-type ModuleId = 'upload' | 'pre-qa' | 'scrapper' | 'jobs' | 'review' | 'images' | 'settings';
+type ModuleId = 'upload' | 'scrapper' | 'jobs' | 'review' | 'images' | 'settings';
 type SettingsSubModuleId = 'api' | 'mapping' | 'indexer';
 
 const SCRAPE_JOB_POLL_TIMEOUT_MS = 600_000;
@@ -268,6 +268,66 @@ function extractHarvestImageUrls(content: string): string[] {
 
   const fallbackMatches = content.match(/https?:\/\/[^\s)"']+\.(?:jpg|jpeg|png|webp|gif|avif|bmp|jfif)(?:\?[^\s)"']*)?/gi) || [];
   return Array.from(new Set(fallbackMatches));
+}
+
+type ImageSortMode = 'default' | 'bytes-desc';
+type ImageUrlMetadata = { bytes: number | null; ok?: boolean; contentType?: string };
+
+const DECORATIVE_IMAGE_KEYWORDS = [
+  'logo',
+  'icon',
+  'sprite',
+  'banner',
+  'header',
+  'footer',
+  'rating',
+  'star',
+  'thumbnail',
+  'thumb',
+  'avatar',
+  'placeholder',
+  'pixel',
+  'tracking',
+  'beacon',
+  'favicon',
+];
+
+function normalizeImageUrlForDisplay(rawUrl: string): string | null {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isDecorativeImageUrl(url: string): boolean {
+  const lower = url.toLowerCase();
+  if (lower.includes('.svg')) return true;
+  return DECORATIVE_IMAGE_KEYWORDS.some((keyword) => lower.includes(keyword));
+}
+
+function filterDisplayImageUrls(urls: string[]): string[] {
+  const seen = new Set<string>();
+  const filtered: string[] = [];
+
+  urls.forEach((url) => {
+    const normalized = normalizeImageUrlForDisplay(url);
+    if (!normalized || isDecorativeImageUrl(normalized)) return;
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    filtered.push(normalized);
+  });
+
+  return filtered;
+}
+
+function formatBytes(bytes: number | null | undefined): string {
+  if (!bytes || bytes <= 0) return 'Size unknown';
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.round(bytes / 1024)} KB`;
 }
 
 function createHarvestEditorEntry(filename: string, content: string, sourceLabel: string): HarvestEditorEntry {
@@ -533,6 +593,9 @@ export default function App() {
   const [tempPlpSelectorName, setTempPlpSelectorName] = useState('');
   const [imageUrls, setImageUrls] = useState<string[]>([]);
   const [selectedImageUrls, setSelectedImageUrls] = useState<string[]>([]);
+  const [imageSortMode, setImageSortMode] = useState<ImageSortMode>('default');
+  const [imageMetadataByUrl, setImageMetadataByUrl] = useState<Record<string, ImageUrlMetadata>>({});
+  const [isLoadingImageMetadata, setIsLoadingImageMetadata] = useState(false);
   const [isExportingImages, setIsExportingImages] = useState(false);
   const [imageExportError, setImageExportError] = useState<string | null>(null);
   const [selectedHarvestSource, setSelectedHarvestSource] = useState<SelectedHarvestImageSource | null>(null);
@@ -544,9 +607,10 @@ export default function App() {
   const [harvestSaveError, setHarvestSaveError] = useState<string | null>(null);
   const [loadingHarvestFile, setLoadingHarvestFile] = useState(false);
   const [selectedJobs, setSelectedJobs] = useState<string[]>([]);
+  const [isBulkMapping, setIsBulkMapping] = useState(false);
   const [isExportingOutputs, setIsExportingOutputs] = useState(false);
   const [outputExportError, setOutputExportError] = useState<string | null>(null);
-  const [selectedSkuIndexItems, setSelectedSkuIndexItems] = useState<string[]>([]);
+  const [, setSelectedSkuIndexItems] = useState<string[]>([]);
   const [jobAiModels, setJobAiModels] = useState<{[sku:string]: string}>({});
   const [customJobAiModels, setCustomJobAiModels] = useState<{[sku:string]: string}>({});
   const [bulkSkuAttributeSet, setBulkSkuAttributeSet] = useState('');
@@ -905,6 +969,59 @@ export default function App() {
   }, [isAdmin]);
 
   useEffect(() => {
+    const urls = filterDisplayImageUrls(imageUrls);
+    if (imageSortMode !== 'bytes-desc' || urls.length === 0) {
+      setIsLoadingImageMetadata(false);
+      return;
+    }
+
+    const missingUrls = urls.filter((url) => !imageMetadataByUrl[url]);
+    if (missingUrls.length === 0) return;
+
+    let cancelled = false;
+    setIsLoadingImageMetadata(true);
+
+    apiFetch('/api/images/metadata', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls: missingUrls }),
+    })
+      .then(async (res) => {
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(payload?.error || 'Failed to load image sizes');
+        return Array.isArray(payload?.images) ? payload.images : [];
+      })
+      .then((images) => {
+        if (cancelled) return;
+        setImageMetadataByUrl((prev) => {
+          const next = { ...prev };
+          images.forEach((image: any) => {
+            if (typeof image?.url === 'string') {
+              next[image.url] = {
+                bytes: typeof image.bytes === 'number' ? image.bytes : null,
+                ok: !!image.ok,
+                contentType: typeof image.contentType === 'string' ? image.contentType : '',
+              };
+            }
+          });
+          return next;
+        });
+      })
+      .catch((error: any) => {
+        if (!cancelled) {
+          addLog('error', error?.message || 'Failed to load image sizes');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingImageMetadata(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [imageUrls, imageSortMode, imageMetadataByUrl]);
+
+  useEffect(() => {
     let mounted = true;
 
     if (!authUser) {
@@ -1188,7 +1305,7 @@ export default function App() {
          addLog('success', `SKU Indexer synced with ${data.length} records (merged with existing).`);
       } else {
          const payload = await res.json().catch(() => null);
-         throw new Error(payload?.error || 'Upload rejected.');
+         throw new Error(payload?.details || payload?.error || `Upload rejected (HTTP ${res.status}).`);
       }
     } catch (err: any) {
       addLog('error', err?.message || 'SKU Indexing failed.');
@@ -1223,10 +1340,11 @@ export default function App() {
         setSelectedSkuIndexItems(prev => prev.filter(s => s !== sku));
         addLog('success', `SKU ${sku} purged (index + harvest + output).`);
       } else {
-        throw new Error('Delete failed');
+        const payload = await res.json().catch(() => null);
+        throw new Error(payload?.details || payload?.error || `Delete failed (HTTP ${res.status}).`);
       }
-    } catch (e) {
-      addLog('error', 'Failed to delete SKU.');
+    } catch (e: any) {
+      addLog('error', `Failed to delete SKU: ${e?.message || 'unknown error'}`);
     }
   };
 
@@ -1251,6 +1369,59 @@ export default function App() {
       fetchJobs();
     } catch (e: any) {
       addLog('error', `Bulk SKU purge failed: ${e?.message ?? 'unknown error'}`);
+    }
+  };
+
+  const handleBulkMapSelected = async () => {
+    if (selectedJobs.length === 0 || isBulkMapping) return;
+    const selectedSet = new Set(selectedJobs);
+    const readyJobs = jobs.filter((job) => selectedSet.has(job.sku) && job.status === 'ready');
+    const skippedCount = selectedJobs.length - readyJobs.length;
+
+    if (skippedCount > 0) {
+      addLog('wait', `Skipped ${skippedCount} selected SKU(s) that are not ready for mapping.`);
+    }
+    if (readyJobs.length === 0) {
+      addLog('error', 'No selected ready SKUs to map.');
+      return;
+    }
+
+    setIsBulkMapping(true);
+    addLog('skill', `Dispatching Map AI for ${readyJobs.length} selected SKU(s).`);
+    try {
+      await Promise.all(readyJobs.map(async (job) => {
+        try {
+          const selectedMapAiModel = jobAiModels[job.sku] || DEFAULT_MAP_AI_MODELS[0];
+          const model = selectedMapAiModel === CUSTOM_MAP_AI_MODEL_VALUE
+            ? (customJobAiModels[job.sku] || '').trim()
+            : selectedMapAiModel;
+
+          if (!model) {
+            addLog('error', `Mapping skipped for ${job.sku}: ${MAP_AI_MISSING_MODEL_MESSAGE}`);
+            return;
+          }
+
+          const startRes = await apiFetch('/api/jobs/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sku: job.sku, aiModel: model }),
+          });
+          if (!startRes.ok) {
+            const errData = await startRes.json().catch(() => ({}));
+            addLog('error', `Mapping failed for ${job.sku}: ${errData?.error || `HTTP ${startRes.status}`}`);
+            return;
+          }
+          const { jobId } = await startRes.json();
+          addLog('skill', `Mapping job queued for ${job.sku} (${jobId}).`);
+          await pollJob(jobId, SCRAPE_JOB_POLL_TIMEOUT_MS);
+          addLog('success', `SKU ${job.sku} mapping cycle complete.`);
+        } catch (error: any) {
+          addLog('error', `Mapping failed for ${job.sku}: ${error?.message || 'unknown error'}`);
+        }
+      }));
+    } finally {
+      setIsBulkMapping(false);
+      fetchJobs();
     }
   };
 
@@ -1323,19 +1494,21 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ data: [normalizeSkuIndexRecordForSubmit(manualSkuData, manualSkuData.attribute_set)] })
       });
-      if (res.ok) {
-        // Re-fetch to get merged state
-        const skuIndexFetchVersion = ++skuIndexFetchVersionRef.current;
-        const idxRes = await apiFetch('/api/sku/index');
-        const refreshedIdx = await idxRes.json();
-        if (skuIndexFetchVersion === skuIndexFetchVersionRef.current) {
-          setSkuIndex(Array.isArray(refreshedIdx) ? refreshedIdx : []);
-        }
-        setManualSkuData({ sku: '', brand: '', ean: '', shipping_weight: '', product_type: '', attribute_set: '', base_code: '', sap_data: '' });
-        addLog('success', `Manual sku indexed: ${submittedSku}`);
+      if (!res.ok) {
+        const payload = await res.json().catch(() => null);
+        throw new Error(payload?.details || payload?.error || `Manual indexing failed (HTTP ${res.status}).`);
       }
-    } catch (e) {
-      addLog('error', 'Manual indexing failed.');
+      // Re-fetch to get merged state
+      const skuIndexFetchVersion = ++skuIndexFetchVersionRef.current;
+      const idxRes = await apiFetch('/api/sku/index');
+      const refreshedIdx = await idxRes.json();
+      if (skuIndexFetchVersion === skuIndexFetchVersionRef.current) {
+        setSkuIndex(Array.isArray(refreshedIdx) ? refreshedIdx : []);
+      }
+      setManualSkuData({ sku: '', brand: '', ean: '', shipping_weight: '', product_type: '', attribute_set: '', base_code: '', sap_data: '' });
+      addLog('success', `Manual sku indexed: ${submittedSku}`);
+    } catch (e: any) {
+      addLog('error', e?.message || 'Manual indexing failed.');
     }
   };
 
@@ -1685,6 +1858,7 @@ export default function App() {
       }
 
       setImageUrls(Array.from(new Set(data.imageUrls || [])));
+      setSelectedImageUrls([]);
       addLog('success', 'Visual Snapshot ready.');
       setProgress(50);
 
@@ -1974,11 +2148,13 @@ export default function App() {
   const uploadLatestError = [...logs].reverse().find((log) =>
     log.type === 'error' && /SKU Index|Excel|Upload|manifest/i.test(log.message)
   );
-  const workflowSteps = ['Upload', 'Pre-QA', 'QA Jobs', 'SKU Review', 'Sources', 'Settings'];
-
+  const displayImageUrls = filterDisplayImageUrls(imageUrls);
+  const hiddenImageUrlCount = Math.max(imageUrls.length - displayImageUrls.length, 0);
+  const sortedImageUrls = imageSortMode === 'bytes-desc'
+    ? [...displayImageUrls].sort((a, b) => (imageMetadataByUrl[b]?.bytes || 0) - (imageMetadataByUrl[a]?.bytes || 0))
+    : displayImageUrls;
   const moduleNavItems: AppShellNavItem<ModuleId>[] = [
     { id: 'upload', label: 'Upload', description: 'Import catalogue data', icon: Upload },
-    { id: 'pre-qa', label: 'Pre-QA', description: 'Readiness checks', icon: Check },
     { id: 'scrapper', label: 'Data Harvest', description: 'Scrape and archive', icon: Cpu },
     { id: 'jobs', label: 'QA Jobs', description: 'Mapping queue', icon: Briefcase },
     { id: 'review', label: 'SKU Review', description: 'Inspect sources', icon: List },
@@ -1988,7 +2164,6 @@ export default function App() {
 
   const moduleMeta: Record<ModuleId, { title: string; subtitle: string }> = {
     upload: { title: 'Upload Catalogue', subtitle: 'Import SKU, attribute, and source data before QA.' },
-    'pre-qa': { title: 'Pre-QA Readiness', subtitle: 'Check source coverage and job readiness before running AI QA.' },
     scrapper: { title: 'Data Harvest', subtitle: 'Capture product content, discovery targets, and markdown harvest files.' },
     jobs: { title: 'QA Jobs', subtitle: 'Dispatch mapping jobs and review generated catalogue outputs.' },
     review: { title: 'SKU Review', subtitle: 'Inspect SKU data, source context, timelines, and outputs.' },
@@ -2039,7 +2214,6 @@ export default function App() {
         />
         {isFirestoreStatusLoading ? 'Firebase Checking' : firestoreHealth?.connected ? 'Firebase Live' : 'Firebase Fallback'}
       </Badge>
-      <Badge tone="neutral">Chromium 124</Badge>
     </>
   );
 
@@ -2110,8 +2284,8 @@ export default function App() {
       <main className="flex flex-1 min-h-0 overflow-hidden max-lg:flex-col">
 
         {/* SECONDARY PANEL: CONFIGURATION */}
-        <aside id="config-panel" className="w-80 shrink-0 border-r border-stone-200 bg-stone-50/70 flex flex-col max-lg:w-full max-lg:max-h-[44vh] max-lg:border-r-0 max-lg:border-b">
-          {currentModule === 'scrapper' && (
+        <aside id="config-panel" className={`${currentModule === 'upload' || currentModule === 'scrapper' ? 'hidden' : 'flex'} w-80 shrink-0 flex-col border-r border-stone-200 bg-stone-50/70 max-lg:w-full max-lg:max-h-[44vh] max-lg:border-r-0 max-lg:border-b`}>
+          {false && currentModule === 'scrapper' && (
             <>
               {/* MODE SELECTOR */}
               <div id="mode-selector" className="border-b border-white/10 p-3">
@@ -2810,359 +2984,6 @@ export default function App() {
           </>
         )}
 
-
-          {currentModule === 'upload' && (
-            <div className="space-y-6">
-              <div className="space-y-3">
-                <div>
-                  <p className="text-sm font-semibold text-slate-950">Catalogue import</p>
-                  <p className="text-xs text-slate-500">Upload the master SKU file or add one SKU manually.</p>
-                </div>
-                <Tabs
-                  items={[
-                    { id: 'upload', label: 'Excel upload' },
-                    { id: 'manual', label: 'Manual SKU' },
-                  ]}
-                  value={indexerMode}
-                  onChange={(value) => setIndexerMode(value as 'upload' | 'manual')}
-                  ariaLabel="SKU indexer mode"
-                  className="grid w-full grid-cols-2"
-                />
-              </div>
-
-              {indexerMode === 'upload' ? (
-                <div className="space-y-4">
-                  <div className="upload-zone group min-h-44">
-                    <input type="file" onChange={handleSkuUpload} accept=".xlsx" aria-label="Upload SKU master index XLSX" className="absolute inset-0 opacity-0 cursor-pointer" />
-                    <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-blue-700">
-                      <FileSpreadsheet className="h-6 w-6" />
-                    </div>
-                    <div>
-                      <div className="text-sm font-semibold text-slate-950">Upload master index</div>
-                      <div className="mt-1 text-xs text-slate-500">Drop or choose an `.xlsx` file. Existing SKUs are merged by SKU.</div>
-                    </div>
-                  </div>
-                  <Select
-                    label="Apply Attribute Set"
-                    value={bulkSkuAttributeSet}
-                    onChange={(e) => setBulkSkuAttributeSet(e.target.value)}
-                    className="text-xs"
-                    helpText="Optional: applies this attribute set to every SKU in the uploaded file."
-                  >
-                    <option value="">Use file column if present</option>
-                    {appSettings.attributeSets.map((set, i) => (
-                      <option key={i} value={set.name}>{set.name}</option>
-                    ))}
-                  </Select>
-                  <Button
-                    onClick={handleDownloadSkuTemplate}
-                    variant="secondary"
-                    size="sm"
-                    className="w-full"
-                  >
-                    Download SKU template
-                  </Button>
-                  <div className="rounded-lg border border-stone-200 bg-white p-4">
-                    <p className="text-sm font-semibold text-slate-950">Expected workbook fields</p>
-                    <div className="mt-3 grid gap-2 text-xs text-slate-600">
-                      <div className="flex items-start gap-2"><Check className="mt-0.5 h-3.5 w-3.5 text-emerald-600" />SKU identifiers: `sku`, `base_code`, brand, EAN.</div>
-                      <div className="flex items-start gap-2"><Check className="mt-0.5 h-3.5 w-3.5 text-emerald-600" />Attribute columns: headers starting with `attributes__`.</div>
-                      <div className="flex items-start gap-2"><Check className="mt-0.5 h-3.5 w-3.5 text-emerald-600" />SAP truth source: current storage uses `sap_data`.</div>
-                      <div className="flex items-start gap-2"><Check className="mt-0.5 h-3.5 w-3.5 text-emerald-600" />Optional source fields: `source__url`, PDF context, or scraped harvest later.</div>
-                    </div>
-                  </div>
-                  <div className="rounded-lg border border-stone-200 bg-stone-50 p-4">
-                    <p className="text-sm font-semibold text-slate-950">Batch source URLs</p>
-                    <p className="mt-1 text-xs text-slate-500">Optional manifest for scraping product pages. Required columns are `sku` and `url`.</p>
-                    <div className="mt-3 grid gap-2">
-                      <label className="relative flex cursor-pointer items-center justify-between rounded-lg border border-dashed border-stone-300 bg-white px-3 py-2 text-sm text-slate-700 hover:border-blue-400 hover:bg-blue-50">
-                        <span>{batchFile ? batchFile.name : 'Choose batch manifest'}</span>
-                        <Upload className="h-4 w-4 text-slate-400" />
-                        <input type="file" onChange={handleBatchUpload} accept=".xlsx" aria-label="Upload batch manifest XLSX" className="absolute inset-0 opacity-0 cursor-pointer" />
-                      </label>
-                      <Button onClick={handleDownloadBatchTemplate} variant="secondary" size="sm" className="w-full">
-                        Download batch template
-                      </Button>
-                      {batchData.length > 0 ? (
-                        <Alert tone="success" className="text-xs">{batchData.length} URL rows loaded for scraping.</Alert>
-                      ) : null}
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3 rounded-lg border border-stone-200 bg-white p-4">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium text-slate-700">SKU *</label>
-                      <input 
-                        type="text" 
-                        value={manualSkuData.sku || ''}
-                        onChange={(e) => setManualSkuData({...manualSkuData, sku: e.target.value})}
-                        className="form-control-mono"
-                        placeholder="e.g. LAP-100"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium text-slate-700">Base Code</label>
-                      <input 
-                        type="text" 
-                        value={manualSkuData.base_code || ''}
-                        onChange={(e) => setManualSkuData({...manualSkuData, base_code: e.target.value})}
-                        className="form-control"
-                      />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium text-slate-700">Brand</label>
-                      <input 
-                        type="text" 
-                        value={manualSkuData.brand || ''}
-                        onChange={(e) => setManualSkuData({...manualSkuData, brand: e.target.value})}
-                        className="form-control"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium text-slate-700">EAN</label>
-                      <input 
-                        type="text" 
-                        value={manualSkuData.ean || ''}
-                        onChange={(e) => setManualSkuData({...manualSkuData, ean: e.target.value})}
-                        className="form-control"
-                      />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium text-slate-700">Weight (kg)</label>
-                      <input 
-                        type="text" 
-                        value={manualSkuData.shipping_weight || ''}
-                        onChange={(e) => setManualSkuData({...manualSkuData, shipping_weight: e.target.value})}
-                        className="form-control"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium text-slate-700">Product Type</label>
-                      <input 
-                        type="text" 
-                        value={manualSkuData.product_type || ''}
-                        onChange={(e) => setManualSkuData({...manualSkuData, product_type: e.target.value})}
-                        className="form-control"
-                      />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <label className="text-xs font-medium text-slate-700">Attribute Set</label>
-                      <select 
-                        value={manualSkuData.attribute_set || ''}
-                        onChange={(e) => setManualSkuData({...manualSkuData, attribute_set: e.target.value})}
-                        className="form-control"
-                      >
-                         <option value="">Select Set...</option>
-                         {appSettings.attributeSets.map((s, i) => (
-                           <option key={i} value={s.name}>{s.name}</option>
-                         ))}
-                      </select>
-                    </div>
-                  </div>
-                  <Textarea
-                      label="SAP Data (Context)"
-                      value={manualSkuData.sap_data || ''}
-                      onChange={(e) => setManualSkuData({...manualSkuData, sap_data: e.target.value})}
-                      placeholder="Paste SAP context data..."
-                      className="h-20 resize-none text-[10px] custom-scrollbar"
-                      helpText="Optional supporting data used by mapping jobs."
-                    />
-                  {!manualSkuData.sku?.trim() && (
-                    <Alert tone="warning" className="text-[11px]">
-                      SKU is required before this record can be saved.
-                    </Alert>
-                  )}
-                  <Button 
-                    onClick={handleManualSkuSubmit}
-                    className="w-full mt-2"
-                  >
-                    Save SKU to Index
-                  </Button>
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-lg border border-stone-200 bg-white p-3">
-                  <div className="text-xs text-slate-500">Uploaded SKUs</div>
-                  <div className="mt-1 text-2xl font-semibold text-slate-950">{uploadedSkuCount}</div>
-                </div>
-                <div className="rounded-lg border border-stone-200 bg-white p-3">
-                  <div className="text-xs text-slate-500">attributes__ fields</div>
-                  <div className="mt-1 text-2xl font-semibold text-slate-950">{uploadedAttributeFields.size}</div>
-                </div>
-                <div className="rounded-lg border border-stone-200 bg-white p-3">
-                  <div className="text-xs text-slate-500">SAP truth source</div>
-                  <div className="mt-1 text-2xl font-semibold text-slate-950">{sapSourceCount}</div>
-                </div>
-                <div className="rounded-lg border border-stone-200 bg-white p-3">
-                  <div className="text-xs text-slate-500">Source URLs</div>
-                  <div className="mt-1 text-2xl font-semibold text-slate-950">{urlSourceCount + batchData.length}</div>
-                </div>
-                <div className="rounded-lg border border-stone-200 bg-white p-3">
-                  <div className="text-xs text-slate-500">PDF context</div>
-                  <div className="mt-1 text-2xl font-semibold text-slate-950">{pdfSourceCount}</div>
-                </div>
-              </div>
-
-              {uploadLatestSuccess ? (
-                <Alert tone="success" className="text-xs">{uploadLatestSuccess.message}</Alert>
-              ) : uploadedSkuCount === 0 ? (
-                <Alert tone="info" className="text-xs">No master index loaded yet. Upload Excel or add a manual SKU to start Pre-QA.</Alert>
-              ) : null}
-              {uploadLatestError ? (
-                <Alert tone="danger" className="text-xs">{uploadLatestError.message}</Alert>
-              ) : null}
-
-              {/* Bulk delete action bar */}
-              {selectedSkuIndexItems.length > 0 && (
-                <div className="flex items-center justify-between rounded-lg border border-red-200 bg-red-50 px-3 py-2">
-                  <span className="text-xs font-medium text-red-700">{selectedSkuIndexItems.length} selected</span>
-                  <button
-                    type="button"
-                    onClick={() => handleBulkSkuDelete(selectedSkuIndexItems, 'indexer')}
-                    className="rounded bg-red-600 px-3 py-1 text-xs font-medium text-white transition-colors hover:bg-red-700"
-                  >
-                    Delete Selected
-                  </button>
-                </div>
-              )}
-
-              <div className="space-y-2 max-h-[400px] overflow-y-auto custom-scrollbar pr-2">
-                 {/* Select all row */}
-                 {skuIndex.length > 0 && (
-                   <div className="flex items-center gap-2 border-b border-stone-200 px-1 pb-2">
-                     <input
-                       type="checkbox"
-                       className="h-4 w-4 cursor-pointer rounded border-stone-300 accent-blue-600"
-                       aria-label="Select all SKU index records"
-                       checked={selectedSkuIndexItems.length === skuIndex.length}
-                       onChange={(e) => {
-                         if (e.target.checked) setSelectedSkuIndexItems(skuIndex.map((s: any) => (s.sku || s.SKU)?.toString() ?? ''));
-                         else setSelectedSkuIndexItems([]);
-                       }}
-                     />
-                     <span className="text-xs text-slate-500">Select all indexed SKUs</span>
-                   </div>
-                 )}
-                 <input type="file" className="hidden" ref={pdfInputRef} accept="application/pdf" aria-label="Attach PDF context to SKU" onChange={handlePdfFileChange} />
-                 {skuIndex.map((s: any, i: number) => {
-                   const skuValue = s.sku || s.SKU;
-                   const hasPdf = !!s.pdf_text;
-                   const isChecked = selectedSkuIndexItems.includes(skuValue?.toString() ?? '');
-                   return (
-                     <div key={i} className={`flex items-center justify-between rounded-lg border p-3 text-xs transition-colors group ${isChecked ? 'border-blue-200 bg-blue-50' : 'border-stone-200 bg-white hover:border-blue-200 hover:bg-blue-50/50'}`}>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="checkbox"
-                            className="h-4 w-4 flex-shrink-0 cursor-pointer rounded border-stone-300 accent-blue-600"
-                            aria-label={`Select SKU ${skuValue}`}
-                            checked={isChecked}
-                            onChange={(e) => {
-                              const v = skuValue?.toString() ?? '';
-                              if (e.target.checked) setSelectedSkuIndexItems(prev => [...prev, v]);
-                              else setSelectedSkuIndexItems(prev => prev.filter(x => x !== v));
-                            }}
-                          />
-                          <div className="flex flex-col">
-                            <span className="flex items-center gap-2 font-mono font-semibold text-blue-700">
-                              {skuValue}
-                              {hasPdf && <span title="PDF Context Attached"><FileText className="w-3 h-3 text-cyan-400" /></span>}
-                            </span>
-                            <span className="text-xs text-slate-500">{s.brand || s.Brand || 'Generic'}</span>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                           <div className="text-right mr-2">
-                              <span className="block text-xs text-slate-500">{s.product_type || 'Uncategorized'}</span>
-                           </div>
-                           <button 
-                             type="button"
-                             onClick={() => handlePdfTrigger(skuValue.toString())}
-                             className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-50 text-blue-700 opacity-0 transition-opacity hover:bg-blue-600 hover:text-white group-hover:opacity-100 focus:opacity-100"
-                             title="Attach PDF as Context 1"
-                             aria-label={`Attach PDF to SKU ${skuValue}`}
-                           >
-                             <FileText className="w-3.5 h-3.5" />
-                           </button>
-                           <button 
-                             type="button"
-                             onClick={() => handleSkuDelete(skuValue.toString())}
-                             className="flex h-7 w-7 items-center justify-center rounded-lg bg-red-50 text-red-700 opacity-0 transition-opacity hover:bg-red-600 hover:text-white group-hover:opacity-100 focus:opacity-100"
-                             aria-label={`Delete SKU ${skuValue}`}
-                           >
-                             <X className="w-3.5 h-3.5" />
-                           </button>
-                        </div>
-                     </div>
-                   );
-                 })}
-              </div>
-            </div>
-          )}
-
-          {currentModule === 'pre-qa' && (
-            <div className="space-y-5">
-              <div>
-                <p className="text-sm font-semibold text-slate-950">Readiness checks</p>
-                <p className="mt-1 text-xs text-slate-500">Pre-QA uses existing SKU, SAP, PDF, harvest, and output state. No data is changed here.</p>
-              </div>
-              <div className="space-y-2">
-                {workflowSteps.map((step, index) => {
-                  const active = index <= 1;
-                  return (
-                    <div key={step} className="flex items-center gap-3">
-                      <div className={`flex h-7 w-7 items-center justify-center rounded-full border text-xs font-semibold ${active ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-stone-200 bg-white text-slate-400'}`}>
-                        {index + 1}
-                      </div>
-                      <span className={active ? 'text-sm font-medium text-slate-900' : 'text-sm text-slate-500'}>{step}</span>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-lg border border-stone-200 bg-white p-3">
-                  <div className="text-xs text-slate-500">Ready for QA</div>
-                  <div className="mt-1 text-2xl font-semibold text-slate-950">{sourceReadyCount}</div>
-                </div>
-                <div className="rounded-lg border border-stone-200 bg-white p-3">
-                  <div className="text-xs text-slate-500">Missing source</div>
-                  <div className="mt-1 text-2xl font-semibold text-slate-950">{missingSourceCount}</div>
-                </div>
-                <div className="rounded-lg border border-stone-200 bg-white p-3">
-                  <div className="text-xs text-slate-500">SAP rows</div>
-                  <div className="mt-1 text-2xl font-semibold text-slate-950">{sapSourceCount}</div>
-                </div>
-                <div className="rounded-lg border border-stone-200 bg-white p-3">
-                  <div className="text-xs text-slate-500">Harvest rows</div>
-                  <div className="mt-1 text-2xl font-semibold text-slate-950">{harvestSourceCount}</div>
-                </div>
-              </div>
-              {uploadedSkuCount === 0 ? (
-                <Alert tone="warning" className="text-xs">Upload a master index before Pre-QA can evaluate readiness.</Alert>
-              ) : missingSourceCount > 0 ? (
-                <Alert tone="warning" className="text-xs">{missingSourceCount} SKU(s) do not yet have SAP, PDF, or scraped harvest data.</Alert>
-              ) : (
-                <Alert tone="success" className="text-xs">All uploaded SKUs have at least one usable source in current state.</Alert>
-              )}
-              <div className="grid gap-2">
-                <Button onClick={() => setCurrentModule('upload')} variant="secondary" size="sm" className="w-full">
-                  Back to Upload
-                </Button>
-                <Button onClick={() => setCurrentModule('scrapper')} size="sm" className="w-full">
-                  Continue to Data Harvest
-                </Button>
-              </div>
-            </div>
-          )}
-
           {currentModule === 'settings' && (
              <div className="p-6 border-b border-stone-200 bg-white">
                 <div className="flex items-center gap-3">
@@ -3180,8 +3001,8 @@ export default function App() {
              </div>
           )}
 
+          {currentModule === 'scrapper' && (
           <div id="cta-area" className="p-6 border-t border-stone-200 bg-white">
-            {currentModule === 'scrapper' ? (
               <div className="space-y-3">
                 {scraperBlockedReason && !isScraping ? (
                   <Alert tone="warning" className="text-[11px] leading-relaxed">
@@ -3198,10 +3019,8 @@ export default function App() {
                   {scraperActionLabel}
                 </Button>
               </div>
-            ) : (
-               <Alert tone="info" className="text-center text-xs">Workflow ready</Alert>
-            )}
           </div>
+          )}
         </aside>
         {/* CENTER PANEL: INTERACTIVE HUB */}
         <section id="main-content" className="flex-1 flex flex-col bg-brand-bg min-h-0 relative">
@@ -3262,274 +3081,218 @@ export default function App() {
                            className="relative w-full pr-4 text-left"
                          >
                             {settingsSubModule === 'api' && (
-                              <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 pt-4 pb-20">
-                                    <section className="space-y-6">
-                                       <div className="flex items-center gap-4">
-                                         <div className="w-14 h-14 bg-blue-600/10 border border-blue-500/20 rounded-2xl flex items-center justify-center shadow-inner">
-                                           <Key className="w-7 h-7 text-blue-400" />
-                                         </div>
-                                         <div>
-                                           <h3 className="text-xl font-bold text-white leading-none">AI Credits Infrastructure</h3>
-                                           <p className="text-[10px] text-white/30 uppercase tracking-widest mt-2">Authentication & Gateway</p>
-                                         </div>
-                                       </div>
-                                       <div className="bg-[#0a0a0a] border border-white/5 rounded-3xl p-10 shadow-2xl relative overflow-hidden group">
-                                          <div className="absolute top-0 right-0 p-4 opacity-5 pointer-events-none group-hover:opacity-10 transition-opacity">
-                                            <Cpu className="w-32 h-32" />
-                                          </div>
-                                          <p className="text-sm text-white/50 leading-relaxed max-w-md mb-10">
-                                             Define your production AI Credits API key for high-speed DeepSeek/Qwen synthesis. 
-                                             Failure to provide a key will trigger an automatic fallback to internal environment defaults.
-                                          </p>
-                                          <div className="space-y-4">
-                                             <div className="flex items-center justify-between">
-                                               <label className="text-[9px] text-white/40 font-bold uppercase tracking-widest">Secret Vault / Master Key</label>
-                                               <span className="text-[9px] text-blue-400/50 font-mono">DeepSeek-V4-Flash</span>
-                                             </div>
-                                             <div className="flex flex-col gap-3">
-                                                <div className="flex flex-col gap-3 sm:flex-row">
-                                                   <div className="relative flex-1">
-                                                     <input 
-                                                       type="password" 
-                                                       value={appSettings.aiCreditsApiKey}
-                                                       onChange={(e) => setAppSettings({...appSettings, aiCreditsApiKey: e.target.value})}
-                                                       placeholder="aicredits_production_key..."
-                                                       className="w-full bg-black/60 border border-white/10 rounded-2xl px-6 py-5 text-sm font-mono text-blue-400 focus:outline-none focus:border-blue-500/50 focus:ring-8 focus:ring-blue-500/5 transition-all shadow-inner"
-                                                     />
-                                                   </div>
-                                                   <button 
-                                                     onClick={() => persistSettings(appSettings)}
-                                                     disabled={isSavingSettings}
-                                                     className="shrink-0 px-5 bg-blue-600 hover:bg-blue-500 disabled:bg-blue-600/40 disabled:text-white/50 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border border-blue-500/20 shadow-xl"
-                                                   >
-                                                      {isSavingSettings ? 'SAVING...' : 'SAVE KEY'}
-                                                   </button>
-                                                   <button 
-                                                     onClick={() => {
-                                                       const updatedSettings = {...appSettings, aiCreditsApiKey: ''};
-                                                       setAppSettings(updatedSettings);
-                                                       if (isAdmin) {
-                                                         persistSettings(updatedSettings);
-                                                       }
-                                                     }}
-                                                     className="shrink-0 px-5 bg-red-600/5 hover:bg-red-600 text-red-500 hover:text-white rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all border border-red-500/10 hover:border-red-600 shadow-xl"
-                                                   >
-                                                      WIPE
-                                                   </button>
-                                                </div>
-                                                <p className="text-[10px] text-white/35 leading-relaxed">
-                                                  {isAdmin
-                                                    ? 'Use SAVE KEY to persist the AI Credits credential. WIPE clears the stored key immediately.'
-                                                    : 'Admin role required to persist or wipe the AI Credits credential.'}
-                                                </p>
-                                             </div>
-                                          </div>
-                                       </div>
-                                    </section>
+                              <div className="grid grid-cols-1 gap-6 pt-4 pb-20 xl:grid-cols-3">
+                                <Card className="p-6">
+                                  <div className="flex items-start gap-3">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
+                                      <Key className="h-5 w-5" />
+                                    </div>
+                                    <div>
+                                      <h3 className="text-lg font-semibold text-slate-950">AI Credits Infrastructure</h3>
+                                      <p className="mt-1 text-sm text-slate-500">Authentication and gateway settings.</p>
+                                    </div>
+                                  </div>
+                                  <div className="mt-6 space-y-4">
+                                    <Input
+                                      type="password"
+                                      label="Secret vault / master key"
+                                      value={appSettings.aiCreditsApiKey}
+                                      onChange={(e) => setAppSettings({ ...appSettings, aiCreditsApiKey: e.target.value })}
+                                      placeholder="aicredits_production_key..."
+                                      className="font-mono text-xs"
+                                      helpText={isAdmin
+                                        ? 'Save persists the AI Credits credential. Wipe clears the stored key immediately.'
+                                        : 'Admin role required to persist or wipe the AI Credits credential.'}
+                                    />
+                                    <div className="flex flex-wrap gap-2">
+                                      <Button onClick={() => persistSettings(appSettings)} disabled={isSavingSettings || !isAdmin} size="sm">
+                                        {isSavingSettings ? 'Saving...' : 'Save key'}
+                                      </Button>
+                                      <Button
+                                        onClick={() => {
+                                          const updatedSettings = { ...appSettings, aiCreditsApiKey: '' };
+                                          setAppSettings(updatedSettings);
+                                          if (isAdmin) persistSettings(updatedSettings);
+                                        }}
+                                        disabled={!isAdmin}
+                                        variant="danger"
+                                        size="sm"
+                                      >
+                                        Wipe
+                                      </Button>
+                                    </div>
+                                  </div>
+                                </Card>
 
-                                    <section className="space-y-6">
-                                      <div className="flex items-center gap-4">
-                                        <div className="w-14 h-14 bg-purple-600/10 border border-purple-500/20 rounded-2xl flex items-center justify-center shadow-inner">
-                                          <Network className="w-7 h-7 text-purple-400" />
-                                        </div>
-                                        <div>
-                                          <h3 className="text-xl font-bold text-white leading-none">Global Mapping Logic</h3>
-                                          <p className="text-[10px] text-white/30 uppercase tracking-widest mt-2">Default Rule Layer</p>
-                                        </div>
-                                      </div>
-                                      <div className="bg-[#0a0a0a] border border-white/5 rounded-3xl p-8 shadow-2xl space-y-4">
-                                        <div className="flex items-center justify-between gap-3">
-                                          <span className="text-[9px] text-white/40 font-bold uppercase tracking-widest">Rule Characters</span>
-                                          <span className="text-[9px] text-purple-300/70 font-mono">
-                                            {(appSettings.globalMappingLogic || '').length}
-                                          </span>
-                                        </div>
-                                        <textarea
-                                          value={appSettings.globalMappingLogic || ''}
-                                          onChange={(e) => setAppSettings({ ...appSettings, globalMappingLogic: e.target.value })}
-                                          className="w-full min-h-48 bg-black/60 border border-white/10 rounded-2xl px-5 py-4 text-xs text-white/80 font-mono leading-relaxed resize-y outline-none focus:border-purple-500/50 custom-scrollbar"
-                                          placeholder="Global mapping rules..."
+                                <Card className="p-6">
+                                  <div className="flex items-start gap-3">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
+                                      <Network className="h-5 w-5" />
+                                    </div>
+                                    <div>
+                                      <h3 className="text-lg font-semibold text-slate-950">Global Mapping Logic</h3>
+                                      <p className="mt-1 text-sm text-slate-500">Default rule layer applied before schema-specific mapping.</p>
+                                    </div>
+                                  </div>
+                                  <div className="mt-6 space-y-4">
+                                    <Textarea
+                                      label="Global mapping rules"
+                                      value={appSettings.globalMappingLogic || ''}
+                                      onChange={(e) => setAppSettings({ ...appSettings, globalMappingLogic: e.target.value })}
+                                      className="min-h-48 resize-y font-mono text-xs leading-relaxed"
+                                      placeholder="Global mapping rules..."
+                                      helpText={`${(appSettings.globalMappingLogic || '').length} characters`}
+                                    />
+                                    <div className="flex items-center justify-between gap-4">
+                                      <p className="text-xs text-slate-500">
+                                        {isAdmin ? 'Saved rules apply to future mapping jobs.' : 'Admin role required to edit global rules.'}
+                                      </p>
+                                      <Button onClick={() => persistSettings(appSettings)} disabled={isSavingSettings || !isAdmin} size="sm">
+                                        {isSavingSettings ? 'Saving...' : 'Save rules'}
+                                      </Button>
+                                    </div>
+                                  </div>
+                                </Card>
+
+                                <Card className="p-6">
+                                  <div className="flex items-start gap-3">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+                                      <Database className="h-5 w-5" />
+                                    </div>
+                                    <div>
+                                      <h3 className="text-lg font-semibold text-slate-950">Access Roles</h3>
+                                      <p className="mt-1 text-sm text-slate-500">Allowlist administration for app users.</p>
+                                    </div>
+                                  </div>
+                                  {isAdmin ? (
+                                    <div className="mt-6 space-y-4">
+                                      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                                        <Input
+                                          type="email"
+                                          label="User email"
+                                          value={newUserEmail}
+                                          onChange={(e) => setNewUserEmail(e.target.value)}
+                                          placeholder="user@company.com"
+                                          wrapperClassName="md:col-span-2"
                                         />
-                                        <div className="flex items-center justify-between gap-4">
-                                          <p className="text-[10px] text-white/35 leading-relaxed">
-                                            {isAdmin
-                                              ? 'Saved rules apply before schema-specific mapping instructions.'
-                                              : 'Admin role required to edit global rules.'}
-                                          </p>
-                                          <button
-                                            onClick={() => persistSettings(appSettings)}
-                                            disabled={isSavingSettings || !isAdmin}
-                                            className="px-6 py-3 bg-purple-600 hover:bg-purple-500 disabled:bg-purple-600/30 disabled:text-white/40 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all border border-purple-500/20 shadow-xl"
-                                          >
-                                            {isSavingSettings ? 'Saving...' : 'Save Rules'}
-                                          </button>
-                                        </div>
+                                        <Select
+                                          label="Role"
+                                          value={newUserRole}
+                                          onChange={(e) => setNewUserRole(e.target.value as 'admin' | 'user')}
+                                        >
+                                          <option value="user">user</option>
+                                          <option value="admin">admin</option>
+                                        </Select>
                                       </div>
-                                    </section>
-
-                                    <section className="space-y-6">
-                                      <div className="flex items-center gap-4">
-                                        <div className="w-14 h-14 bg-emerald-600/10 border border-emerald-500/20 rounded-2xl flex items-center justify-center shadow-inner">
-                                          <Database className="w-7 h-7 text-emerald-400" />
-                                        </div>
-                                        <div>
-                                          <h3 className="text-xl font-bold text-white leading-none">Access Roles</h3>
-                                          <p className="text-[10px] text-white/30 uppercase tracking-widest mt-2">Allowlist Administration</p>
-                                        </div>
+                                      <div className="flex flex-wrap gap-2">
+                                        <Button onClick={upsertAllowlistUser} disabled={isManagingUsers || !newUserEmail.trim()} size="sm">
+                                          {isManagingUsers ? 'Saving...' : 'Add/update user'}
+                                        </Button>
+                                        <Button onClick={fetchAllowlistUsers} disabled={isManagingUsers} variant="secondary" size="sm">
+                                          Refresh
+                                        </Button>
                                       </div>
-                                      <div className="bg-[#0a0a0a] border border-white/5 rounded-3xl p-8 shadow-2xl">
-                                        {isAdmin ? (
-                                          <div className="space-y-4">
-                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                              <input
-                                                type="email"
-                                                value={newUserEmail}
-                                                onChange={(e) => setNewUserEmail(e.target.value)}
-                                                placeholder="user@company.com"
-                                                className="md:col-span-2 bg-black/60 border border-white/10 rounded-xl px-4 py-3 text-xs text-white focus:outline-none focus:border-emerald-500"
-                                              />
-                                              <select
-                                                value={newUserRole}
-                                                onChange={(e) => setNewUserRole((e.target.value as 'admin' | 'user'))}
-                                                className="bg-black/60 border border-white/10 rounded-xl px-3 py-3 text-xs text-white focus:outline-none focus:border-emerald-500"
-                                              >
-                                                <option value="user">user</option>
-                                                <option value="admin">admin</option>
-                                              </select>
+                                      <div className="max-h-56 space-y-2 overflow-y-auto pr-1 custom-scrollbar">
+                                        {allowlistUsers.map((u) => (
+                                          <div key={u.email} className="flex items-center justify-between gap-3 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2">
+                                            <div className="min-w-0">
+                                              <div className="truncate text-sm font-medium text-slate-900">{u.email}</div>
+                                              <div className="mt-0.5 text-xs uppercase tracking-wider text-slate-500">{u.role}</div>
                                             </div>
-                                            <div className="flex gap-3">
-                                              <button
-                                                onClick={upsertAllowlistUser}
-                                                disabled={isManagingUsers || !newUserEmail.trim()}
-                                                className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-600/40 disabled:text-white/50 text-white text-[10px] font-bold uppercase tracking-widest"
-                                              >
-                                                {isManagingUsers ? 'Saving...' : 'Add/Update User'}
-                                              </button>
-                                              <button
-                                                onClick={fetchAllowlistUsers}
-                                                disabled={isManagingUsers}
-                                                className="px-5 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-white/70 text-[10px] font-bold uppercase tracking-widest border border-white/10"
-                                              >
-                                                Refresh
-                                              </button>
-                                            </div>
-                                            <div className="space-y-2 max-h-52 overflow-y-auto custom-scrollbar pr-1">
-                                              {allowlistUsers.map((u) => (
-                                                <div key={u.email} className="flex items-center justify-between gap-3 bg-white/[0.03] border border-white/10 rounded-xl px-3 py-2">
-                                                  <div className="min-w-0">
-                                                    <div className="text-xs text-white truncate">{u.email}</div>
-                                                    <div className="text-[10px] text-white/40 uppercase tracking-widest">{u.role}</div>
-                                                  </div>
-                                                  <button
-                                                    onClick={() => deleteAllowlistUser(u.email)}
-                                                    disabled={isManagingUsers || u.email === authUser?.email}
-                                                    className="px-3 py-1 rounded-lg bg-red-500/10 hover:bg-red-500 text-red-400 hover:text-white disabled:opacity-40 text-[10px] font-bold uppercase tracking-wider"
-                                                    title={u.email === authUser?.email ? 'Cannot delete your own active account' : 'Remove user'}
-                                                  >
-                                                    Remove
-                                                  </button>
-                                                </div>
-                                              ))}
-                                              {allowlistUsers.length === 0 && (
-                                                <p className="text-[11px] text-white/40">No users found.</p>
-                                              )}
-                                            </div>
+                                            <Button
+                                              onClick={() => deleteAllowlistUser(u.email)}
+                                              disabled={isManagingUsers || u.email === authUser?.email}
+                                              variant="danger"
+                                              size="sm"
+                                              title={u.email === authUser?.email ? 'Cannot delete your own active account' : 'Remove user'}
+                                            >
+                                              Remove
+                                            </Button>
                                           </div>
-                                        ) : (
-                                          <p className="text-[11px] text-white/40">Admin role required to manage users and roles.</p>
+                                        ))}
+                                        {allowlistUsers.length === 0 && (
+                                          <p className="rounded-lg border border-dashed border-stone-300 p-4 text-sm text-slate-500">No users found.</p>
                                         )}
                                       </div>
-                                    </section>
+                                    </div>
+                                  ) : (
+                                    <Alert tone="warning" className="mt-6 text-sm">Admin role required to manage users and roles.</Alert>
+                                  )}
+                                </Card>
                               </div>
                             )}
 
                             {settingsSubModule === 'mapping' && (
-                              <div className="flex flex-col gap-10 pt-4 pb-20">
-                                 <div className="bg-[#0a0a0a] border border-white/5 rounded-[32px] p-10 space-y-10 shadow-2xl">
-                                    <div className="space-y-2">
-                                        <div className="flex items-center justify-between">
-                                          <h3 className="text-xl font-bold text-white tracking-tight">Mapping Logic</h3>
-                                          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-purple-500/10 border border-purple-500/20 rounded-full animate-pulse">
-                                            <Network className="w-3 h-3 text-purple-500" />
-                                            <span className="text-[8px] font-bold text-purple-500 uppercase tracking-tighter">Logic Sync</span>
+                              <div className="flex flex-col gap-6 pt-4 pb-20">
+                                <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                                  <div>
+                                    <h3 className="text-xl font-semibold text-slate-950">Mapping Logic</h3>
+                                    <p className="mt-1 text-sm text-slate-500">Map each attribute schema to its extraction rules.</p>
+                                  </div>
+                                  <Badge tone="blue">
+                                    <Network className="h-3 w-3" /> Logic sync
+                                  </Badge>
+                                </div>
+
+                                {appSettings.attributeSets.length === 0 ? (
+                                  <EmptyState
+                                    icon={<Network className="h-8 w-8" />}
+                                    title="No schemas available"
+                                    description="Create a schema in the Schema Hub first to assign mapping logic."
+                                  />
+                                ) : (
+                                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+                                    {appSettings.attributeSets.map((set, idx) => (
+                                      <Card key={idx} className="flex h-full flex-col p-5">
+                                        <div className="flex items-start justify-between gap-3">
+                                          <div className="min-w-0">
+                                            <div className="flex items-center gap-2">
+                                              <h4 className="truncate text-base font-semibold text-slate-950">{set.name}</h4>
+                                              {(set.mdRules || '').trim() && (
+                                                <span
+                                                  className="h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-100"
+                                                  title="Mapping logic attached"
+                                                  aria-label="Mapping logic attached"
+                                                />
+                                              )}
+                                            </div>
+                                            <p className="mt-1 text-xs text-slate-500">{set.fields.length} logic points</p>
+                                          </div>
+                                          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-700">
+                                            <Network className="h-4 w-4" />
                                           </div>
                                         </div>
-                                        <p className="text-[10px] text-white/30 uppercase tracking-[0.3em] font-medium leading-relaxed">Map properties to extraction rules.</p>
-                                    </div>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                                       {appSettings.attributeSets.map((set, idx) => (
-                                          <motion.div 
-                                            initial={{ opacity: 0, scale: 0.95 }}
-                                            animate={{ opacity: 1, scale: 1 }}
-                                            key={idx} 
-                                            className="bg-[#0a0a0a] border border-white/5 rounded-[32px] p-8 hover:bg-white/[0.03] transition-all group relative overflow-hidden shadow-2xl flex flex-col h-full"
-                                          >
-                                             <div className="absolute -right-6 -top-6 w-32 h-32 bg-purple-500/[0.02] rounded-full blur-3xl pointer-events-none" />
-                                             <div className="flex items-center gap-5 mb-8">
-                                                <div className="w-12 h-12 bg-purple-600/10 border border-purple-500/20 rounded-2xl flex items-center justify-center shadow-inner">
-                                                  <Network className="w-6 h-6 text-purple-400" />
-                                                </div>
-                                                <div>
-                                                   <span className="flex items-center gap-2 text-lg font-black text-white tracking-tight leading-none mb-1">
-                                                     {set.name}
-                                                     {(set.mdRules || '').trim() && (
-                                                       <span
-                                                         className="block h-2.5 w-2.5 rounded-full bg-emerald-500 ring-2 ring-emerald-100"
-                                                         title="Mapping logic attached"
-                                                         aria-label="Mapping logic attached"
-                                                       />
-                                                     )}
-                                                   </span>
-                                                   <p className="text-[9px] text-white/20 uppercase tracking-widest">{set.fields.length} Logic Points</p>
-                                                </div>
-                                             </div>
-                                            
-                                             <div className="mt-auto border-t border-white/10 pt-4">
-                                                <div className="flex items-center justify-between">
-                                                   <div className="flex items-center gap-2">
-                                                      <FileText className="w-4 h-4 text-white/40" />
-                                                      <span className="text-[10px] uppercase font-bold tracking-widest text-white/40">Mapping Logic</span>
-                                                   </div>
-                                                   <button 
-                                                     onClick={() => setEditingSetRules(idx)} 
-                                                     className="text-[9px] px-3 py-1 bg-white/5 hover:bg-purple-600 rounded border border-white/10 text-white/60 hover:text-white uppercase font-bold transition-all"
-                                                   >
-                                                     {(set.mdRules || '').trim() ? 'EDIT LOGIC' : 'ADD LOGIC'}
-                                                   </button>
-                                                </div>
-                                              </div>
-                                              {set.mdFileName && (
-                                                 <div className="mt-3 p-3 bg-purple-500/10 border border-purple-500/20 rounded-xl flex items-center justify-between">
-                                                    <span className="text-[10px] font-mono text-purple-400 truncate">{set.mdFileName}</span>
-                                                    <button 
-                                                      onClick={() => {
-                                                         const newSets = [...appSettings.attributeSets];
-                                                         newSets[idx] = { ...newSets[idx], mdRules: undefined, mdFileName: undefined };
-                                                         const updatedSettings = {...appSettings, attributeSets: newSets};
-                                                         setAppSettings(updatedSettings);
-                                                         persistSettings(updatedSettings);
-                                                      }}
-                                                      className="text-red-400 hover:text-red-300 p-1"
-                                                    >
-                                                      <X className="w-3 h-3" />
-                                                    </button>
-                                                 </div>
-                                              )}
-                                          </motion.div>
-                                       ))}
-                                       {appSettings.attributeSets.length === 0 && (
-                                          <div className="col-span-full py-20 border border-dashed border-white/10 rounded-[48px] flex flex-col items-center justify-center text-center opacity-30">
-                                            <div className="w-20 h-20 bg-white/5 rounded-full flex items-center justify-center mb-8 border border-white/5 shadow-inner">
-                                              <Network className="w-10 h-10 text-white" />
+
+                                        <div className="mt-5 flex flex-1 flex-col justify-end gap-3 border-t border-stone-200 pt-4">
+                                          {set.mdFileName ? (
+                                            <div className="flex items-center justify-between gap-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2">
+                                              <span className="truncate font-mono text-xs text-blue-700">{set.mdFileName}</span>
+                                              <Button
+                                                onClick={() => {
+                                                  const newSets = [...appSettings.attributeSets];
+                                                  newSets[idx] = { ...newSets[idx], mdRules: undefined, mdFileName: undefined };
+                                                  const updatedSettings = { ...appSettings, attributeSets: newSets };
+                                                  setAppSettings(updatedSettings);
+                                                  persistSettings(updatedSettings);
+                                                }}
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-7 w-7 text-red-600 hover:bg-red-50 hover:text-red-700"
+                                                aria-label={`Remove mapping file from ${set.name}`}
+                                              >
+                                                <X className="h-3.5 w-3.5" />
+                                              </Button>
                                             </div>
-                                            <h5 className="text-sm font-bold text-white uppercase tracking-[0.3em] mb-3">No Schemas Available</h5>
-                                            <p className="text-[11px] text-white/40 font-medium px-20 leading-relaxed max-w-sm">
-                                              Create a schema in the Schema Hub first to assign mapping logic.
-                                            </p>
-                                          </div>
-                                       )}
-                                    </div>
-                                 </div>
+                                          ) : null}
+                                          <Button onClick={() => setEditingSetRules(idx)} variant="secondary" size="sm">
+                                            <FileText className="h-3.5 w-3.5" />
+                                            {(set.mdRules || '').trim() ? 'Edit logic' : 'Add logic'}
+                                          </Button>
+                                        </div>
+                                      </Card>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
                             )}
 
@@ -3779,8 +3542,351 @@ export default function App() {
                   </motion.div>
                 </div>
               ) : currentModule === 'scrapper' ? (
-               <>
-                 <Card padded={false} className={`h-[350px] terminal-card flex flex-col overflow-hidden shrink-0 transition-all ${isScraping ? 'ring-1 ring-blue-500/20' : ''}`}>
+               <div className="mx-auto grid w-full max-w-7xl flex-1 gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+                 <Card className="p-0 overflow-hidden xl:col-start-1 xl:row-start-1">
+                   <div className="border-b border-stone-200 px-5 py-4">
+                     <div className="responsive-toolbar">
+                       <div>
+                         <h2 className="text-2xl font-semibold tracking-tight text-slate-950">Data Harvest</h2>
+                         <p className="mt-1 text-sm text-slate-500">Capture product pages, batch manifests, and PLP discovery targets.</p>
+                       </div>
+                       <div className="responsive-actions">
+                         <Button onClick={() => { fetchHarvest(); setShowHarvestModal(true); }} variant="secondary" size="sm">
+                           <Archive className="h-3.5 w-3.5" /> Harvest archive
+                         </Button>
+                       </div>
+                     </div>
+                     <Tabs
+                       items={[...scraperModeTabs]}
+                       value={mode}
+                       onChange={(nextMode) => {
+                         setMode(nextMode);
+                         setDiscoveryMode(nextMode === 'deep');
+                       }}
+                       ariaLabel="Harvest mode"
+                       className="mt-4 grid w-full grid-cols-3 sm:w-auto"
+                     />
+                   </div>
+
+                   <div className="space-y-5 p-5">
+                     {mode === 'single' ? (
+                       <>
+                         <div className="grid gap-4 lg:grid-cols-2">
+                           <Select
+                             label="Target SKU Index"
+                             value={skuIndex.some((s) => (s.sku || s.SKU) === harvestSku) ? harvestSku : ''}
+                             onChange={(e) => setHarvestSku(e.target.value)}
+                             disabled={isScraping}
+                             className="font-mono text-xs uppercase"
+                             helpText="Choose an indexed SKU, or enter one manually below."
+                           >
+                             <option value="">Select SKU from Index</option>
+                             {skuIndex.map((s, i) => (
+                               <option key={i} value={s.sku || s.SKU}>{s.sku || s.SKU}</option>
+                             ))}
+                           </Select>
+                           <Input
+                             label="Manual SKU"
+                             type="text"
+                             value={harvestSku}
+                             onChange={(e) => setHarvestSku(e.target.value)}
+                             disabled={isScraping}
+                             placeholder="Or enter manual SKU..."
+                             className="font-mono text-xs uppercase"
+                           />
+                           <Input
+                             label="Target URL"
+                             type="text"
+                             value={url}
+                             onChange={(e) => setUrl(e.target.value)}
+                             disabled={isScraping}
+                             placeholder="https://example.com/product"
+                             className="font-mono text-xs"
+                             error={!url.trim() ? 'Required to start a product scrape.' : undefined}
+                             wrapperClassName="lg:col-span-2"
+                           />
+                         </div>
+                         <div className="grid gap-4 lg:grid-cols-2">
+                           <Input
+                             label="Specific Selector"
+                             type="text"
+                             value={selector}
+                             onChange={(e) => setSelector(e.target.value)}
+                             placeholder="e.g. .specs-table"
+                             disabled={isScraping}
+                             className="font-mono text-xs"
+                             helpText="Optional: limit extraction to a known product details container."
+                           />
+                           <div>
+                             <div className="mb-2 flex items-center justify-between">
+                               <span className="text-xs font-medium text-slate-600">Site Presets</span>
+                               {selector ? (
+                                 <button onClick={() => setShowSaveDialog(true)} className="text-xs font-semibold text-blue-700 hover:text-blue-800">
+                                   Save selector
+                                 </button>
+                               ) : null}
+                             </div>
+                             <PresetDropdown
+                               presets={savedSelectors}
+                               onSelect={(profile) => {
+                                 setSelector(profile.selector);
+                                 if (profile.strategy) setStrategy(profile.strategy);
+                               }}
+                               onDelete={deleteSelector}
+                               defaultText="Choose preset"
+                               disabled={isScraping}
+                             />
+                           </div>
+                           <Select label="AI Strategy" value={strategy} onChange={(e) => setStrategy(e.target.value)} disabled={isScraping} className="text-xs">
+                             <option value="LLMExtractionStrategy">Advanced AI (Dormant)</option>
+                             <option value="AIExtractionStrategy">DeepSeek/Qwen (Fast Batch)</option>
+                             <option value="JsonLdExtractionStrategy">JSON-LD Meta</option>
+                             <option value="WholeCaptureStrategy">Whole Capture</option>
+                           </Select>
+                           <div className="grid grid-cols-2 gap-3">
+                             {[
+                               ['Screenshots', screenshotEnabled, setScreenshotEnabled],
+                               ['Deep Scroll', deepScrollEnabled, setDeepScrollEnabled],
+                             ].map(([label, enabled, setter]) => (
+                               <button
+                                 key={label as string}
+                                 type="button"
+                                 role="switch"
+                                 aria-checked={enabled as boolean}
+                                 onClick={() => (setter as React.Dispatch<React.SetStateAction<boolean>>)(!(enabled as boolean))}
+                                 className={`rounded-lg border p-3 text-left transition-colors ${enabled ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-stone-200 bg-stone-50 text-slate-600'}`}
+                               >
+                                 <span className="text-xs font-semibold">{label as string}</span>
+                               </button>
+                             ))}
+                           </div>
+                         </div>
+
+                         {!hasSecondaryTarget ? (
+                           <Button onClick={() => setHasSecondaryTarget(true)} variant="secondary" className="border-dashed">
+                             <Plus className="h-3.5 w-3.5" /> Add Secondary Target
+                           </Button>
+                         ) : (
+                           <div className="rounded-lg border border-stone-200 bg-stone-50 p-4">
+                             <div className="mb-4 flex items-center justify-between">
+                               <div>
+                                 <h3 className="text-sm font-semibold text-slate-950">Secondary target</h3>
+                                 <p className="mt-1 text-xs text-slate-500">Optional supporting context for comparison.</p>
+                               </div>
+                               <Button onClick={() => { setHasSecondaryTarget(false); setUrl2(''); setSelector2(''); }} variant="ghost" size="sm">
+                                 <X className="h-3.5 w-3.5" /> Remove
+                               </Button>
+                             </div>
+                             <div className="grid gap-4 lg:grid-cols-2">
+                               <Input label="Target URL 2" type="text" value={url2} onChange={(e) => setUrl2(e.target.value)} disabled={isScraping} placeholder="https://example.com/product-context" className="font-mono text-xs" />
+                               <Input label="Specific Selector 2" type="text" value={selector2} onChange={(e) => setSelector2(e.target.value)} disabled={isScraping} placeholder="e.g. .specs-table" className="font-mono text-xs" />
+                               <div>
+                                 <div className="mb-2 text-xs font-medium text-slate-600">Site Presets</div>
+                                 <PresetDropdown
+                                   presets={savedSelectors}
+                                   onSelect={(profile) => {
+                                     setSelector2(profile.selector);
+                                     if (profile.strategy) setStrategy2(profile.strategy);
+                                   }}
+                                   onDelete={deleteSelector}
+                                   defaultText="Choose preset"
+                                   disabled={isScraping}
+                                 />
+                               </div>
+                               <Select label="AI Strategy 2" value={strategy2} onChange={(e) => setStrategy2(e.target.value)} disabled={isScraping} className="text-xs">
+                                 <option value="LLMExtractionStrategy">Advanced AI (Dormant)</option>
+                                 <option value="AIExtractionStrategy">DeepSeek/Qwen (Fast Batch)</option>
+                                 <option value="JsonLdExtractionStrategy">JSON-LD Meta</option>
+                                 <option value="WholeCaptureStrategy">Whole Capture</option>
+                               </Select>
+                             </div>
+                           </div>
+                         )}
+                       </>
+                     ) : mode === 'batch' ? (
+                       <>
+                         <div className="grid gap-4 lg:grid-cols-[1fr_1.2fr]">
+                           <div className="space-y-3">
+                             <label className="relative flex min-h-44 cursor-pointer flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-stone-300 bg-stone-50 p-5 text-center hover:border-blue-400 hover:bg-blue-50">
+                               <Upload className="h-7 w-7 text-blue-700" />
+                               <span className="text-sm font-semibold text-slate-950">{batchFile ? batchFile.name : 'Upload batch manifest'}</span>
+                               <span className="text-xs text-slate-500">Excel columns: SKU, URL</span>
+                               <input type="file" onChange={handleBatchUpload} accept=".xlsx" aria-label="Upload batch manifest XLSX" className="absolute inset-0 cursor-pointer opacity-0" />
+                             </label>
+                             <Button onClick={handleDownloadBatchTemplate} variant="secondary" size="sm">
+                               Download Batch Template
+                             </Button>
+                             {batchData.length > 0 ? (
+                               <Alert tone="success" className="text-xs">
+                                 {batchData.length} URLs loaded. <button onClick={() => setBatchData([])} className="font-semibold underline">Clear</button>
+                               </Alert>
+                             ) : null}
+                           </div>
+                           <div className="grid gap-4">
+                             <Input label="Specific Selector" type="text" value={selector} onChange={(e) => setSelector(e.target.value)} placeholder="e.g. .specs-table" className="font-mono text-xs" />
+                             <div>
+                               <div className="mb-2 flex items-center justify-between">
+                                 <span className="text-xs font-medium text-slate-600">Site Presets</span>
+                                 {selector ? <button onClick={() => setShowSaveDialog(true)} className="text-xs font-semibold text-blue-700 hover:text-blue-800">Save selector</button> : null}
+                               </div>
+                               <PresetDropdown
+                                 presets={savedSelectors}
+                                 onSelect={(profile) => {
+                                   setSelector(profile.selector);
+                                   if (profile.strategy) setStrategy(profile.strategy);
+                                 }}
+                                 onDelete={deleteSelector}
+                                 defaultText="Choose preset"
+                               />
+                             </div>
+                             <Select label="AI Strategy" value={strategy} onChange={(e) => setStrategy(e.target.value)} disabled={isScraping} className="text-xs">
+                               <option value="LLMExtractionStrategy">Advanced AI (Dormant)</option>
+                               <option value="AIExtractionStrategy">DeepSeek/Qwen (Fast Batch)</option>
+                               <option value="JsonLdExtractionStrategy">JSON-LD Meta</option>
+                               <option value="WholeCaptureStrategy">Whole Capture</option>
+                             </Select>
+                           </div>
+                         </div>
+                         <div className="rounded-lg border border-stone-200 bg-stone-50 p-4">
+                           <div className="responsive-toolbar">
+                             <div>
+                               <h3 className="text-sm font-semibold text-slate-950">Recent batch results</h3>
+                               <p className="mt-1 text-xs text-slate-500">Open saved markdown harvest files without leaving the module.</p>
+                             </div>
+                             <Button onClick={fetchHarvest} variant="secondary" size="sm">Refresh</Button>
+                           </div>
+                           <div className="mt-3 grid max-h-64 gap-2 overflow-y-auto custom-scrollbar md:grid-cols-2">
+                             {harvestFiles.length === 0 ? (
+                               <div className="rounded-lg border border-dashed border-stone-300 bg-white p-4 text-center text-xs text-slate-500">No harvest assets found</div>
+                             ) : harvestFiles.map((file: any, idx: number) => (
+                               <div key={idx} className="flex items-center justify-between gap-3 rounded-lg border border-stone-200 bg-white p-3">
+                                 <div className="min-w-0">
+                                   <div className="truncate font-mono text-xs font-semibold text-slate-800">{file.name}</div>
+                                   <div className="mt-1 text-xs text-slate-500">{(file.size / 1024).toFixed(1)} KB</div>
+                                 </div>
+                                 <Button onClick={() => openHarvestFile(file.name, 'batch harvest')} variant="secondary" size="sm">Open</Button>
+                               </div>
+                             ))}
+                           </div>
+                         </div>
+                       </>
+                     ) : (
+                       <>
+                         <div className="grid gap-4 lg:grid-cols-2">
+                           <Input label="PLP (Listing) URL" type="text" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="e.g. samsung.com/in/smartphones" className="font-mono text-xs" error={!url.trim() ? 'A listing URL is required before discovery can run.' : undefined} />
+                           <Input label="PLP Selectors" type="text" value={plpSelector} onChange={(e) => setPlpSelector(e.target.value)} placeholder="e.g. .product-item a" className="font-mono text-xs" helpText="Optional selector for product cards or links." />
+                           <div>
+                             <div className="mb-2 flex items-center justify-between">
+                               <span className="text-xs font-medium text-slate-600">PLP Presets</span>
+                               {plpSelector ? <button onClick={() => setShowSavePlpDialog(true)} className="text-xs font-semibold text-blue-700 hover:text-blue-800">Save selector</button> : null}
+                             </div>
+                             <PresetDropdown
+                               presets={savedPlpSelectors}
+                               onSelect={(profile) => setPlpSelector(profile.selector)}
+                               onDelete={deletePlpSelector}
+                               defaultText="Choose PLP preset"
+                               isPlp={true}
+                             />
+                           </div>
+                           <div className="flex items-end">
+                             <Button onClick={handleDiscover} disabled={isDiscovering || isScraping || !url.trim()} className="w-full">
+                               {isDiscovering ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                               {isDiscovering ? 'Discovering Targets...' : 'Run PLP Discovery'}
+                             </Button>
+                           </div>
+                         </div>
+                         <div className="grid gap-4 lg:grid-cols-2">
+                           <Input label="Target Page Selector" type="text" value={selector} onChange={(e) => setSelector(e.target.value)} placeholder="e.g. .specs-table" className="font-mono text-xs" helpText="Optional: applied to each discovered target page." />
+                           <div>
+                             <div className="mb-2 flex items-center justify-between">
+                               <span className="text-xs font-medium text-slate-600">Site Presets</span>
+                               {selector ? <button onClick={() => setShowSaveDialog(true)} className="text-xs font-semibold text-blue-700 hover:text-blue-800">Save selector</button> : null}
+                             </div>
+                             <PresetDropdown
+                               presets={savedSelectors}
+                               onSelect={(profile) => {
+                                 setSelector(profile.selector);
+                                 if (profile.strategy) setStrategy(profile.strategy);
+                               }}
+                               onDelete={deleteSelector}
+                               defaultText="Use preset for deep scrape"
+                             />
+                           </div>
+                           <Select label="AI Strategy" value={strategy} onChange={(e) => setStrategy(e.target.value)} disabled={isScraping} className="text-xs">
+                             <option value="LLMExtractionStrategy">Advanced AI (Dormant)</option>
+                             <option value="AIExtractionStrategy">DeepSeek/Qwen (Fast Batch)</option>
+                             <option value="JsonLdExtractionStrategy">JSON-LD Meta</option>
+                             <option value="WholeCaptureStrategy">Whole Capture</option>
+                           </Select>
+                           <button
+                             type="button"
+                             role="switch"
+                             aria-checked={screenshotEnabled}
+                             onClick={() => setScreenshotEnabled(!screenshotEnabled)}
+                             className={`rounded-lg border p-3 text-left transition-colors ${screenshotEnabled ? 'border-blue-200 bg-blue-50 text-blue-800' : 'border-stone-200 bg-stone-50 text-slate-600'}`}
+                           >
+                             <span className="text-xs font-semibold">Visual Context</span>
+                             <span className="mt-1 block text-xs">Capture screenshots</span>
+                           </button>
+                         </div>
+                       </>
+                     )}
+
+                     <AnimatePresence>
+                       {showSaveDialog && (
+                         <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }} className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+                           <Input autoFocus label="Site Preset Name" type="text" value={tempSelectorName} onChange={(e) => setTempSelectorName(e.target.value)} placeholder="e.g. Tech Specs Profile" className="text-xs" />
+                           <div className="mt-3 flex gap-2">
+                             <Button onClick={saveSelector} size="sm">Save</Button>
+                             <Button onClick={() => setShowSaveDialog(false)} variant="secondary" size="sm">Cancel</Button>
+                           </div>
+                         </motion.div>
+                       )}
+                     </AnimatePresence>
+                     <AnimatePresence>
+                       {showSavePlpDialog && (
+                         <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }} className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+                           <Input autoFocus label="PLP Preset Name" type="text" value={tempPlpSelectorName} onChange={(e) => setTempPlpSelectorName(e.target.value)} placeholder="e.g. My Category List" className="text-xs" />
+                           <div className="mt-3 flex gap-2">
+                             <Button onClick={savePlpSelector} size="sm">Save</Button>
+                             <Button onClick={() => setShowSavePlpDialog(false)} variant="secondary" size="sm">Cancel</Button>
+                           </div>
+                         </motion.div>
+                       )}
+                     </AnimatePresence>
+
+                     <div className="border-t border-stone-200 pt-5">
+                       <div className="responsive-toolbar">
+                         <div>
+                           <h3 className="text-sm font-semibold text-slate-950">Ready to run</h3>
+                           <p className="mt-1 text-xs text-slate-500">Uses the same scraper endpoints and polling flow as before.</p>
+                         </div>
+                         <div className="responsive-actions">
+                           {mode === 'single' ? (
+                             <Button onClick={handleSmartAnalyze} disabled={isAnalyzing || isScraping || !url} variant="secondary">
+                               {isAnalyzing ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />}
+                               AI Analyze
+                             </Button>
+                           ) : null}
+                           <Button
+                             onClick={mode === 'single' ? handleScrape : (mode === 'batch' ? handleBatchScrape : handleDeepScrape)}
+                             disabled={isScraping || (mode === 'single' && !url) || (mode === 'batch' && batchData.length === 0) || (mode === 'deep' && selectedLinks.length === 0)}
+                             size="lg"
+                           >
+                             {isScraping ? <Loader2 className="h-5 w-5 animate-spin" /> : <Zap className="h-5 w-5" />}
+                             {scraperActionLabel}
+                           </Button>
+                         </div>
+                       </div>
+                       {scraperBlockedReason && !isScraping ? (
+                         <Alert tone="warning" className="mt-3 text-xs">{scraperBlockedReason}</Alert>
+                       ) : null}
+                     </div>
+                   </div>
+                 </Card>
+
+                 <aside className="xl:sticky xl:top-6 xl:col-start-2 xl:row-span-2 xl:row-start-1 xl:self-start">
+                   <Card padded={false} className={`terminal-card flex h-[320px] flex-col overflow-hidden transition-all xl:h-[calc(100vh-9rem)] ${isScraping ? 'ring-1 ring-blue-500/20' : ''}`}>
                     <div className="min-h-10 border-b border-white/10 flex flex-wrap items-center px-4 py-2 justify-between gap-2 bg-white/[0.02]">
                        <div className="flex items-center gap-2"><Terminal className="w-3 h-3 text-blue-300" /><span className="text-[10px] font-mono text-white/65 uppercase tracking-widest">Live Progress</span></div>
                        <div className="flex items-center gap-2">
@@ -3810,9 +3916,10 @@ export default function App() {
                       ))}
                       <div ref={logsEndRef} />
                     </div>
-                 </Card>
+                   </Card>
+                 </aside>
 
-                 <div className="flex-1 flex flex-col min-h-0">
+                 <div className="flex min-h-0 flex-col xl:col-start-1 xl:row-start-2">
                     {discoveryMode && discoveredLinks.length > 0 && (
                       <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mb-6 rounded-xl border border-blue-500/20 bg-blue-500/5 flex flex-col overflow-hidden max-h-72">
                          <div className="min-h-12 border-b border-blue-500/20 px-4 py-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -3989,8 +4096,8 @@ export default function App() {
                       )
                     )}
                  </div>
-               </>
-             ) : currentModule === 'jobs' ? (
+               </div>
+              ) : currentModule === 'jobs' ? (
                <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6">
                   <div className="responsive-toolbar">
                     <div>
@@ -4000,13 +4107,23 @@ export default function App() {
                     <div className="responsive-actions">
                         <Button onClick={() => fetchJobs()} variant="secondary" size="md"><Activity className="w-3.5 h-3.5" /> Re-sync</Button>
                         {selectedJobs.length > 0 && (
-                          <Button
-                            onClick={() => handleBulkSkuDelete(selectedJobs, 'jobs')}
-                            variant="danger"
-                            size="md"
-                          >
-                            <X className="w-3.5 h-3.5" /> Delete ({selectedJobs.length})
-                          </Button>
+                          <>
+                            <Button
+                              onClick={handleBulkMapSelected}
+                              disabled={isBulkMapping}
+                              size="md"
+                            >
+                              {isBulkMapping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
+                              Map selected ({selectedJobs.length})
+                            </Button>
+                            <Button
+                              onClick={() => handleBulkSkuDelete(selectedJobs, 'jobs')}
+                              variant="danger"
+                              size="md"
+                            >
+                              <X className="w-3.5 h-3.5" /> Delete ({selectedJobs.length})
+                            </Button>
+                          </>
                         )}
                         <Button onClick={handleExportOutputs} disabled={isExportingOutputs} className="bg-green-600 hover:bg-green-500" size="md">
                            {isExportingOutputs ? 'Exporting...' : `Export XLS ${selectedJobs.length > 0 ? `(${selectedJobs.length})` : ''}`}
@@ -4017,7 +4134,7 @@ export default function App() {
                     <Alert tone="danger" className="text-xs">{outputExportError}</Alert>
                   ) : null}
 
-                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
                     {[
                       ['Total SKUs', jobsTotal ?? jobs.length, 'Jobs in the current queue', 'neutral'],
                       ['Ready for mapping', readyMappingJobCount, 'Can run Map AI now', 'blue'],
@@ -4027,8 +4144,8 @@ export default function App() {
                     ].map(([label, value, help, tone]) => (
                       <Card key={label as string} className="p-4">
                         <Badge tone={tone as any}>{label}</Badge>
-                        <div className="mt-3 text-3xl font-semibold text-slate-950">{value}</div>
-                        <div className="mt-1 text-xs text-slate-500">{help}</div>
+                        <div className="mt-2 text-2xl font-semibold text-slate-950">{value}</div>
+                        <div className="mt-1 text-xs leading-relaxed text-slate-500">{help}</div>
                       </Card>
                     ))}
                   </div>
@@ -4055,7 +4172,7 @@ export default function App() {
                   </div>
 
                       <div className="data-table-shell flex flex-1 flex-col">
-                      <div className="data-table-header grid min-w-[1280px] grid-cols-[1fr_5fr_7fr_5fr_7fr_4fr_3fr_6fr_7fr] items-center px-6 py-3">
+                      <div className="data-table-header grid min-w-[1180px] grid-cols-[1fr_6fr_5fr_7fr_5fr_3fr_6fr_8fr] items-center px-6 py-3">
                          <div className="flex items-center">
                            <input 
                              type="checkbox" 
@@ -4072,7 +4189,6 @@ export default function App() {
                            />
                          </div>
                          <div>SKU</div>
-                         <div>Product</div>
                          <div>Attribute set</div>
                          <div>Source readiness</div>
                          <div>Status / output</div>
@@ -4084,7 +4200,7 @@ export default function App() {
                          {jobs.map((job, idx) => {
                             const jobAttributeSet = readSkuAttributeSetForDisplay(job);
                             return (
-                            <div key={idx} className="data-table-row grid min-h-20 min-w-[1280px] grid-cols-[1fr_5fr_7fr_5fr_7fr_4fr_3fr_6fr_7fr] items-center px-6 py-3">
+                            <div key={idx} className="data-table-row grid min-h-20 min-w-[1180px] grid-cols-[1fr_6fr_5fr_7fr_5fr_3fr_6fr_8fr] items-center px-6 py-3">
                                <div className="flex items-center">
                                  <input 
                                    type="checkbox" 
@@ -4098,7 +4214,6 @@ export default function App() {
                                  />
                                </div>
                                <div className="font-mono text-sm font-semibold text-blue-700">{job.sku}</div>
-                               <div className="truncate pr-6 text-sm font-medium text-slate-700">{job.title || 'Unknown product'}</div>
                                <div className="truncate text-xs font-medium text-slate-600">{jobAttributeSet || 'Default'}</div>
                                <div className="flex flex-col justify-center gap-1 text-xs">
                                  {job.harvestFile && (
@@ -4371,14 +4486,14 @@ export default function App() {
                  ) : null}
                </div>
              ) : currentModule === 'upload' ? (
-               <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6">
+               <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col gap-6">
                   <div className="responsive-toolbar">
                     <div>
                       <h2 className="text-2xl font-semibold tracking-tight text-slate-950">Import catalogue data</h2>
-                      <p className="mt-1 text-sm text-slate-500">Upload Excel, confirm source coverage, then move into Pre-QA checks.</p>
+                      <p className="mt-1 text-sm text-slate-500">Upload Excel, confirm source coverage, then move into QA Jobs.</p>
                     </div>
-                    <Button onClick={() => setCurrentModule('pre-qa')} disabled={uploadedSkuCount === 0}>
-                      Open Pre-QA
+                    <Button onClick={() => setCurrentModule('jobs')} disabled={uploadedSkuCount === 0}>
+                      Open QA Jobs
                     </Button>
                   </div>
 
@@ -4397,24 +4512,174 @@ export default function App() {
                     ))}
                   </div>
 
-                  {uploadedSkuCount === 0 ? (
-                    <EmptyState
-                      icon={<FileSpreadsheet className="h-8 w-8" />}
-                      title="No catalogue uploaded yet"
-                      description="Use the import panel to upload the SKU master XLSX or create a manual SKU. Pre-QA will populate from real indexed data."
-                    />
-                  ) : (
-                    <Card className="overflow-hidden p-0">
+                  <Card className="overflow-hidden p-0">
+                    <div className="border-b border-stone-200 px-5 py-4">
+                      <div className="responsive-toolbar">
+                        <div>
+                          <h3 className="text-base font-semibold text-slate-950">Catalogue import</h3>
+                          <p className="mt-1 text-sm text-slate-500">Upload the master SKU file, add one manually, or attach source URLs for later scraping.</p>
+                        </div>
+                        <Tabs
+                          items={[
+                            { id: 'upload', label: 'Excel upload' },
+                            { id: 'manual', label: 'Manual SKU' },
+                          ]}
+                          value={indexerMode}
+                          onChange={(value) => setIndexerMode(value as 'upload' | 'manual')}
+                          ariaLabel="SKU indexer mode"
+                          className="grid w-full grid-cols-2 sm:w-auto"
+                        />
+                      </div>
+                    </div>
+
+                    {indexerMode === 'upload' ? (
+                      <div className="grid gap-4 p-5 lg:grid-cols-[1.2fr_1fr]">
+                        <div className="grid gap-3">
+                          <div className="upload-zone group min-h-52">
+                            <input type="file" onChange={handleSkuUpload} accept=".xlsx" aria-label="Upload SKU master index XLSX" className="absolute inset-0 opacity-0 cursor-pointer" />
+                            <div className="rounded-lg border border-blue-100 bg-blue-50 p-3 text-blue-700">
+                              <FileSpreadsheet className="h-7 w-7" />
+                            </div>
+                            <div>
+                              <div className="text-base font-semibold text-slate-950">Upload master index</div>
+                              <div className="mt-1 text-sm text-slate-500">Drop or choose an `.xlsx` file. Existing SKUs are merged by SKU.</div>
+                            </div>
+                          </div>
+                          <Button onClick={handleDownloadSkuTemplate} variant="secondary" size="sm" className="w-fit">
+                            Download SKU template
+                          </Button>
+                        </div>
+
+                        <div className="grid gap-4">
+                          <Select
+                            label="Apply Attribute Set"
+                            value={bulkSkuAttributeSet}
+                            onChange={(e) => setBulkSkuAttributeSet(e.target.value)}
+                            helpText="Optional: applies this attribute set to every SKU in the uploaded file."
+                          >
+                            <option value="">Use file column if present</option>
+                            {appSettings.attributeSets.map((set, i) => (
+                              <option key={i} value={set.name}>{set.name}</option>
+                            ))}
+                          </Select>
+
+                          <div className="rounded-lg border border-stone-200 bg-stone-50 p-4">
+                            <div className="responsive-toolbar">
+                              <div>
+                                <p className="text-sm font-semibold text-slate-950">Batch source URLs</p>
+                                <p className="mt-1 text-xs text-slate-500">Optional manifest for scraping product pages. Required columns are `sku` and `url`.</p>
+                              </div>
+                              <Button onClick={handleDownloadBatchTemplate} variant="secondary" size="sm">
+                                Download batch template
+                              </Button>
+                            </div>
+                            <label className="relative mt-4 flex cursor-pointer items-center justify-between rounded-lg border border-dashed border-stone-300 bg-white px-3 py-3 text-sm text-slate-700 hover:border-blue-400 hover:bg-blue-50">
+                              <span>{batchFile ? batchFile.name : 'Choose batch manifest'}</span>
+                              <Upload className="h-4 w-4 text-slate-400" />
+                              <input type="file" onChange={handleBatchUpload} accept=".xlsx" aria-label="Upload batch manifest XLSX" className="absolute inset-0 opacity-0 cursor-pointer" />
+                            </label>
+                            {batchData.length > 0 ? (
+                              <Alert tone="success" className="mt-3 text-xs">{batchData.length} URL rows loaded for scraping.</Alert>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="grid gap-4 p-5 lg:grid-cols-2">
+                        <Input
+                          label="SKU *"
+                          value={manualSkuData.sku || ''}
+                          onChange={(e) => setManualSkuData({ ...manualSkuData, sku: e.target.value })}
+                          className="font-mono"
+                          placeholder="e.g. LAP-100"
+                        />
+                        <Input
+                          label="Base Code"
+                          value={manualSkuData.base_code || ''}
+                          onChange={(e) => setManualSkuData({ ...manualSkuData, base_code: e.target.value })}
+                        />
+                        <Input
+                          label="Brand"
+                          value={manualSkuData.brand || ''}
+                          onChange={(e) => setManualSkuData({ ...manualSkuData, brand: e.target.value })}
+                        />
+                        <Input
+                          label="EAN"
+                          value={manualSkuData.ean || ''}
+                          onChange={(e) => setManualSkuData({ ...manualSkuData, ean: e.target.value })}
+                        />
+                        <Input
+                          label="Weight (kg)"
+                          value={manualSkuData.shipping_weight || ''}
+                          onChange={(e) => setManualSkuData({ ...manualSkuData, shipping_weight: e.target.value })}
+                        />
+                        <Input
+                          label="Product Type"
+                          value={manualSkuData.product_type || ''}
+                          onChange={(e) => setManualSkuData({ ...manualSkuData, product_type: e.target.value })}
+                        />
+                        <Select
+                          label="Attribute Set"
+                          value={manualSkuData.attribute_set || ''}
+                          onChange={(e) => setManualSkuData({ ...manualSkuData, attribute_set: e.target.value })}
+                        >
+                          <option value="">Select Set...</option>
+                          {appSettings.attributeSets.map((s, i) => (
+                            <option key={i} value={s.name}>{s.name}</option>
+                          ))}
+                        </Select>
+                        <Textarea
+                          label="SAP Data (Context)"
+                          value={manualSkuData.sap_data || ''}
+                          onChange={(e) => setManualSkuData({ ...manualSkuData, sap_data: e.target.value })}
+                          placeholder="Paste SAP context data..."
+                          className="h-24 resize-none text-xs custom-scrollbar"
+                          wrapperClassName="lg:col-span-2"
+                          helpText="Optional supporting data used by mapping jobs."
+                        />
+                        {!manualSkuData.sku?.trim() && (
+                          <Alert tone="warning" className="text-xs lg:col-span-2">
+                            SKU is required before this record can be saved.
+                          </Alert>
+                        )}
+                        <div className="lg:col-span-2">
+                          <Button onClick={handleManualSkuSubmit}>
+                            Save SKU to Index
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </Card>
+
+                  {uploadLatestSuccess ? (
+                    <Alert tone="success" className="text-xs">{uploadLatestSuccess.message}</Alert>
+                  ) : uploadedSkuCount === 0 ? (
+                    <Alert tone="info" className="text-xs">No master index loaded yet. Upload Excel or add a manual SKU to start QA Jobs.</Alert>
+                  ) : null}
+                  {uploadLatestError ? (
+                    <Alert tone="danger" className="text-xs">{uploadLatestError.message}</Alert>
+                  ) : null}
+
+                  <Card className="overflow-hidden p-0">
+                      <input type="file" className="hidden" ref={pdfInputRef} accept="application/pdf" aria-label="Attach PDF context to SKU" onChange={handlePdfFileChange} />
                       <div className="border-b border-stone-200 px-5 py-4">
                         <h3 className="text-base font-semibold text-slate-950">Recent indexed SKUs</h3>
                         <p className="mt-1 text-sm text-slate-500">Showing up to 12 records from the current master index.</p>
                       </div>
-                      <div className="divide-y divide-stone-100">
+                      {uploadedSkuCount === 0 ? (
+                        <EmptyState
+                          icon={<FileSpreadsheet className="h-8 w-8" />}
+                          title="No catalogue uploaded yet"
+                          description="Upload the SKU master XLSX or create a manual SKU to populate the indexed SKU list."
+                          className="m-5"
+                        />
+                      ) : (
+                        <div className="divide-y divide-stone-100">
                         {skuRecords.slice(0, 12).map((sku, i) => {
                           const skuValue = (sku.sku || sku.SKU || `SKU-${i + 1}`).toString();
                           const skuAttributeSet = readSkuAttributeSetForDisplay(sku);
                           return (
-                            <div key={`${skuValue}-${i}`} className="grid gap-3 px-5 py-4 md:grid-cols-[1.2fr_1fr_1fr_1fr] md:items-center">
+                            <div key={`${skuValue}-${i}`} className="grid gap-3 px-5 py-4 md:grid-cols-[1.2fr_0.9fr_1fr_1fr_auto] md:items-center">
                               <div>
                                 <div className="font-mono text-sm font-semibold text-blue-700">{skuValue}</div>
                                 <div className="mt-1 text-sm text-slate-500">{sku.title || sku.Name || sku.brand || sku.Brand || 'Unlabeled record'}</div>
@@ -4427,70 +4692,20 @@ export default function App() {
                                 {hasUrlSource(sku) ? <Badge tone="neutral">URL</Badge> : null}
                               </div>
                               <div className="text-sm text-slate-500">{sku.product_type || sku.category || 'Uncategorized'}</div>
+                              <div className="flex flex-wrap gap-2 md:justify-end">
+                                <Button onClick={() => handlePdfTrigger(skuValue)} variant="secondary" size="sm">
+                                  <FileText className="h-3.5 w-3.5" /> Index PDF
+                                </Button>
+                                <Button onClick={() => handleSkuDelete(skuValue)} variant="danger" size="sm">
+                                  <Trash2 className="h-3.5 w-3.5" /> Delete
+                                </Button>
+                              </div>
                             </div>
                           );
                         })}
-                      </div>
-                    </Card>
-                  )}
-               </div>
-             ) : currentModule === 'pre-qa' ? (
-               <div className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6">
-                  <div className="responsive-toolbar">
-                    <div>
-                      <h2 className="text-2xl font-semibold tracking-tight text-slate-950">Pre-QA readiness dashboard</h2>
-                      <p className="mt-1 text-sm text-slate-500">Review source coverage before scraping, mapping, reviewing, and exporting.</p>
-                    </div>
-                    <div className="responsive-actions">
-                      <Button onClick={() => setCurrentModule('upload')} variant="secondary">Upload data</Button>
-                      <Button onClick={() => setCurrentModule('scrapper')} disabled={uploadedSkuCount === 0}>Continue</Button>
-                    </div>
-                  </div>
-
-                  <Card className="p-4">
-                    <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
-                      {workflowSteps.map((step, index) => (
-                        <div key={step} className="rounded-lg border border-stone-200 bg-stone-50 p-3">
-                          <div className="flex items-center gap-2">
-                            <div className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${index <= 1 ? 'bg-blue-600 text-white' : 'bg-white text-slate-500 ring-1 ring-stone-200'}`}>
-                              {index + 1}
-                            </div>
-                            <div className="text-sm font-medium text-slate-900">{step}</div>
-                          </div>
                         </div>
-                      ))}
-                    </div>
-                  </Card>
-
-                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-                    {[
-                      ['Ready for QA', sourceReadyCount, 'SKUs with usable SAP, PDF, or scraped source data', 'blue'],
-                      ['Missing source', missingSourceCount, 'No SAP, PDF, or harvested scrape currently attached', 'amber'],
-                      ['Has SAP/source data', sapSourceCount, 'SAP is displayed as the truth source', 'amber'],
-                      ['Has scraped/harvest data', harvestSourceCount, 'Harvest markdown available for SKU', 'green'],
-                      ['Completed outputs', completedJobCount, 'QA result JSON already exists', 'green'],
-                      ['Failed or pending items', failedJobCount + pendingJobCount, 'Needs attention before export', failedJobCount > 0 ? 'red' : 'neutral'],
-                    ].map(([label, value, help, tone]) => (
-                      <Card key={label as string} className="p-5">
-                        <Badge tone={tone as any}>{label}</Badge>
-                        <div className="mt-4 text-3xl font-semibold text-slate-950">{value}</div>
-                        <div className="mt-1 text-sm text-slate-500">{help}</div>
-                      </Card>
-                    ))}
-                  </div>
-
-                  {uploadedSkuCount === 0 ? (
-                    <EmptyState
-                      icon={<AlertCircle className="h-8 w-8" />}
-                      title="Pre-QA needs catalogue data"
-                      description="Upload an XLSX master index or create a manual SKU first. This dashboard only uses real app state."
-                      action={<Button onClick={() => setCurrentModule('upload')}>Go to Upload</Button>}
-                    />
-                  ) : missingSourceCount > 0 ? (
-                    <Alert tone="warning">Some SKUs are missing SAP, PDF, or scraped harvest context. Add SAP data, attach PDFs, or run scraping before mapping those SKUs.</Alert>
-                  ) : (
-                    <Alert tone="success">Current uploaded SKUs have at least one usable source. SAP data remains the highest-priority truth source during mapping.</Alert>
-                  )}
+                      )}
+                    </Card>
                </div>
              ) : currentModule === 'images' ? (
                <div className="sources-saas flex-1 flex flex-col gap-6 max-w-6xl mx-auto w-full pb-10">
@@ -4625,6 +4840,16 @@ export default function App() {
                         <span className="rounded-full border border-stone-200 bg-stone-50 px-3 py-1 text-xs font-medium text-slate-600">
                           {selectedImageUrls.length}/10 selected
                         </span>
+                        <Select
+                          aria-label="Sort image URLs"
+                          value={imageSortMode}
+                          onChange={(e) => setImageSortMode(e.target.value as ImageSortMode)}
+                          wrapperClassName="min-w-44"
+                          className="h-8 py-1 text-xs"
+                        >
+                          <option value="default">Original order</option>
+                          <option value="bytes-desc">Largest bytes first</option>
+                        </Select>
                         <Button
                           onClick={() => setSelectedImageUrls([])}
                           disabled={selectedImageUrls.length === 0}
@@ -4645,18 +4870,31 @@ export default function App() {
                     {imageExportError && (
                       <Alert tone="danger">{imageExportError}</Alert>
                     )}
+                    {hiddenImageUrlCount > 0 && (
+                      <Alert tone="info">{hiddenImageUrlCount} duplicate or decorative image URL(s) hidden from this list.</Alert>
+                    )}
+                    {isLoadingImageMetadata && imageSortMode === 'bytes-desc' && (
+                      <Alert tone="info">Loading image byte sizes...</Alert>
+                    )}
                     {imageUrls.length === 0 ? (
                       <EmptyState
                         icon={<ImageIcon className="h-8 w-8" />}
                         title="No scraped image URLs yet"
                         description="Load a harvest file or run image extraction to populate export-ready image sources."
                       />
+                    ) : sortedImageUrls.length === 0 ? (
+                      <EmptyState
+                        icon={<ImageIcon className="h-8 w-8" />}
+                        title="Only duplicate or decorative images found"
+                        description="Header, footer, logo, icon, banner, tracking, and duplicate URLs are hidden from the export list."
+                      />
                     ) : (
                       <div className="space-y-3">
-                        {imageUrls.map((src, index) => {
+                        {sortedImageUrls.map((src, index) => {
                           const isSelected = selectedImageUrls.includes(src);
                           const isDisabled = !isSelected && selectedImageUrls.length >= 10;
                           const exportSku = sanitizeImageSku(selectedHarvestSource?.sku || imageSku || 'sku');
+                          const metadata = imageMetadataByUrl[src];
                           return (
                             <button
                               key={`${src}-${index}`}
@@ -4687,6 +4925,9 @@ export default function App() {
                                 </div>
                                 <div className="shrink-0 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-xs font-medium text-slate-600">
                                   {exportSku}-{index + 1}.jpg
+                                </div>
+                                <div className="shrink-0 rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs font-medium text-slate-500">
+                                  {formatBytes(metadata?.bytes)}
                                 </div>
                                 <div className="min-w-0 flex-1">
                                   <div className="mb-2 text-xs font-medium text-slate-500">

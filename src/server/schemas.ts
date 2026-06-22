@@ -36,6 +36,10 @@ export const ImageExtractRequestSchema = z.object({
   screenshotEnabled: z.boolean().optional(),
 });
 
+export const ImageMetadataRequestSchema = z.object({
+  urls: z.array(z.string().min(1).max(4096)).min(1).max(50),
+});
+
 export const SKUIndexRequestSchema = z.object({
   data: z.array(z.record(z.any())).min(1, 'At least one SKU required'),
 });
@@ -79,6 +83,7 @@ export type ScrapeRequest = z.infer<typeof ScrapeRequestSchema>;
 export type DiscoverRequest = z.infer<typeof DiscoverRequestSchema>;
 export type AnalyzeRequest = z.infer<typeof AnalyzeRequestSchema>;
 export type ImageExtractRequest = z.infer<typeof ImageExtractRequestSchema>;
+export type ImageMetadataRequest = z.infer<typeof ImageMetadataRequestSchema>;
 export type SKUIndexRequest = z.infer<typeof SKUIndexRequestSchema>;
 export type SettingsRequest = z.infer<typeof SettingsRequestSchema>;
 export type LoginRequest = z.infer<typeof LoginRequestSchema>;

@@ -1,22 +1,42 @@
 [
   {
-    "sku": "1",
-    "brand": "",
-    "ean": "",
-    "shipping_weight": "",
-    "product_type": "",
-    "base_code": "",
-    "sap_data": "",
+    "sku": "25456745",
+    "base_code": 25456745,
+    "brand": "HP",
+    "sap_data": null,
+    "ean": "64764374572456",
+    "shipping_weight": 3000,
+    "product_type": "Laptop",
     "attribute_set": "Elec-C&A-Laptops"
   },
   {
-    "sku": "2",
-    "brand": "",
-    "ean": "",
-    "shipping_weight": "",
+    "sku": "25456746",
+    "base_code": 25456746,
+    "brand": "Apple",
+    "sap_data": null,
+    "ean": "64764374572457",
+    "shipping_weight": 3000,
     "product_type": "Smartphone",
-    "base_code": "",
-    "sap_data": "",
+    "attribute_set": "Elec-M&W-Smartphones & Tablets"
+  },
+  {
+    "sku": "25456747",
+    "base_code": 25456747,
+    "brand": "Lenovo",
+    "sap_data": null,
+    "ean": "64764374572458",
+    "shipping_weight": 3000,
+    "product_type": "Laptop",
+    "attribute_set": "Elec-C&A-Laptops"
+  },
+  {
+    "sku": "25456748",
+    "base_code": 25456748,
+    "brand": "Samsung",
+    "sap_data": null,
+    "ean": "64764374572459",
+    "shipping_weight": 3000,
+    "product_type": "Smartphone",
     "attribute_set": "Elec-M&W-Smartphones & Tablets"
   }
 ]
